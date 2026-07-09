@@ -1,8 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:http";
-import { mkdtempSync, statSync, existsSync } from "node:fs";
-import { writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -81,6 +80,58 @@ runIf("sandbox-exec integration", () => {
       }
     } finally {
       server.close();
+    }
+  });
+
+  it("keeps shell escapes inside the same Seatbelt profile", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "seatbelt-shell-"));
+    const outside = mkdtempSync(join(tmpdir(), "seatbelt-shell-out-"));
+    const outsideFile = join(outside, "escaped.txt");
+    const profile = await createProfileFile({ readable: [cwd, "/bin", "/usr", "/System", "/Library", "/etc", "/private/etc", "/dev/null", "/dev/urandom"], writable: [cwd], denyRead: [], denyWrite: [outside], network: "none" });
+    try {
+      const ops = createSeatbeltBashOperations(profile.path);
+      expect((await ops.exec("/bin/sh -c 'echo ok > via-sh.txt'", cwd, { onData() {} })).exitCode).toBe(0);
+      expect((await ops.exec(`/bin/sh -c 'echo no > ${JSON.stringify(outsideFile)}'`, cwd, { onData() {} })).exitCode).not.toBe(0);
+      expect((await ops.exec(`target=${JSON.stringify(outsideFile)}; echo no > \"$(printf %s \"$target\")\"`, cwd, { onData() {} })).exitCode).not.toBe(0);
+      expect(existsSync(outsideFile)).toBe(false);
+    } finally {
+      await profile.dispose();
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks symlink traversal to files outside writable roots", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "seatbelt-link-"));
+    const outside = mkdtempSync(join(tmpdir(), "seatbelt-link-out-"));
+    mkdirSync(join(outside, "target"));
+    symlinkSync(join(outside, "target"), join(cwd, "link"));
+    const profile = await createProfileFile({ readable: [cwd, "/bin", "/usr", "/System", "/Library", "/etc", "/private/etc", "/dev/null", "/dev/urandom"], writable: [cwd], denyRead: [], denyWrite: [outside], network: "none" });
+    try {
+      const ops = createSeatbeltBashOperations(profile.path);
+      expect((await ops.exec("echo no > link/escaped.txt", cwd, { onData() {} })).exitCode).not.toBe(0);
+      expect(existsSync(join(outside, "target", "escaped.txt"))).toBe(false);
+    } finally {
+      await profile.dispose();
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("allows configured temp writes while blocking denied temp writes", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "seatbelt-tmp-"));
+    const tempTarget = join(tmpdir(), `seatbelt-temp-write-${Date.now()}.txt`);
+    const outside = mkdtempSync(join(tmpdir(), "seatbelt-temp-denied-"));
+    const outsideFile = join(outside, "x.txt");
+    const profile = await createProfileFile({ readable: [cwd, "/bin", "/usr", "/System", "/Library", "/etc", "/private/etc", "/dev/null", "/dev/urandom"], writable: [cwd, tmpdir()], denyRead: [], denyWrite: [outside], network: "none" });
+    try {
+      const ops = createSeatbeltBashOperations(profile.path);
+      expect((await ops.exec(`echo ok > ${JSON.stringify(tempTarget)}`, cwd, { onData() {} })).exitCode).toBe(0);
+      expect(existsSync(tempTarget)).toBe(true);
+      expect((await ops.exec(`echo no > ${JSON.stringify(outsideFile)}`, cwd, { onData() {} })).exitCode).not.toBe(0);
+      expect(existsSync(outsideFile)).toBe(false);
+    } finally {
+      await profile.dispose();
+      rmSync(tempTarget, { force: true });
+      rmSync(outside, { recursive: true, force: true });
     }
   });
 

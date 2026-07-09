@@ -12,13 +12,19 @@ export interface ToolGuardState {
 export function registerToolGuard(pi: ExtensionAPI, state: ToolGuardState): void {
   pi.on("tool_call", (event) => {
     if (!state.isActive()) return;
-    const target = (event.input as { path?: unknown }).path;
-    if (typeof target !== "string" || target.length === 0) return;
+
+    const mode = READERS.has(event.toolName) ? "read" : WRITERS.has(event.toolName) ? "write" : undefined;
+    if (!mode) return;
 
     try {
-      if (READERS.has(event.toolName)) assertCanRead(target, requirePolicy(state));
-      else if (WRITERS.has(event.toolName)) assertCanWrite(target, requirePolicy(state));
-      else return;
+      const policy = requirePolicy(state);
+      const target = (event.input as { path?: unknown }).path;
+      if (typeof target !== "string" || target.trim().length === 0) {
+        throw new Error(`seatbelt policy blocked ${event.toolName}: missing or invalid path`);
+      }
+
+      if (mode === "read") assertCanRead(target, policy);
+      else assertCanWrite(target, policy);
     } catch (error) {
       return { block: true, reason: error instanceof Error ? error.message : String(error) };
     }

@@ -126,19 +126,19 @@ export function buildPolicy(config: Pick<SeatbeltConfig, "readable" | "writable"
   };
 }
 
-function matchesRule(path: string, rule: PathRule, allowPrefixForGlob: boolean): boolean {
+function matchesRule(path: string, rule: PathRule): boolean {
   if (rule.glob) {
     const normalized = normalizeForRegex(path);
-    return Boolean(rule.regex?.test(normalized)) || (allowPrefixForGlob && rule.prefix !== undefined && isInside(path, rule.prefix));
+    return Boolean(rule.regex?.test(normalized));
   }
   return isInside(path, rule.value);
 }
 
 function assertAllowed(path: string, policy: PathPolicy, denyRules: PathRule[], allowRules: PathRule[], mode: "read" | "write"): void {
   const target = canon(path, policy.cwd);
-  const deny = denyRules.find((rule) => matchesRule(target, rule, false));
+  const deny = denyRules.find((rule) => matchesRule(target, rule));
   if (deny) throw new Error(`seatbelt policy blocked ${mode} for ${target}: denied by ${deny.raw}`);
-  if (!allowRules.some((rule) => matchesRule(target, rule, true))) {
+  if (!allowRules.some((rule) => matchesRule(target, rule))) {
     throw new Error(`seatbelt policy blocked ${mode} for ${target}: outside allowed roots`);
   }
 }

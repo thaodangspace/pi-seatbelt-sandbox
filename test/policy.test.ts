@@ -38,10 +38,19 @@ describe("path policy", () => {
     expect(() => assertCanWrite(join(root, ".env.local"), policy)).toThrow(/denied/);
   });
 
-  it("uses non-glob prefix for readable/writable glob allows", () => {
+  it("matches readable/writable glob allows exactly instead of granting the non-glob prefix", async () => {
     const root = mkdtempSync(join(tmpdir(), "seatbelt-allowglob-"));
-    const policy = buildPolicy({ readable: [join(root, "src", "**", "*.ts")], writable: [], denyRead: [], denyWrite: [] }, root);
-    expect(() => assertCanRead(join(root, "src", "other.txt"), policy)).not.toThrow();
-    expect(() => assertCanRead(join(root, "outside.txt"), policy)).toThrow(/outside allowed roots/);
+    await mkdir(join(root, "src", "nested"), { recursive: true });
+    await writeFile(join(root, "src", "index.ts"), "export {};\n");
+    await writeFile(join(root, "src", "nested", "file.ts"), "export {};\n");
+    await writeFile(join(root, "src", "other.txt"), "nope\n");
+    const policy = buildPolicy({ readable: [join(root, "src", "**", "*.ts")], writable: [join(root, "src", "**", "*.ts")], denyRead: [], denyWrite: [] }, root);
+
+    expect(() => assertCanRead(join(root, "src", "index.ts"), policy)).not.toThrow();
+    expect(() => assertCanRead(join(root, "src", "nested", "file.ts"), policy)).not.toThrow();
+    expect(() => assertCanWrite(join(root, "src", "nested", "new.ts"), policy)).not.toThrow();
+    expect(() => assertCanRead(join(root, "src", "other.txt"), policy)).toThrow(/outside allowed roots/);
+    expect(() => assertCanWrite(join(root, "src", "other.txt"), policy)).toThrow(/outside allowed roots/);
+    expect(() => assertCanRead(join(root, "outside.ts"), policy)).toThrow(/outside allowed roots/);
   });
 });

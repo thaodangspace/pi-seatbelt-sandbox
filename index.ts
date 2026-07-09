@@ -7,6 +7,7 @@ import { ConfigError, DEFAULT_CONFIG, expandConfigPath, loadConfig, type Seatbel
 import { buildPolicy, type PathPolicy } from "./src/policy.ts";
 import { createProfileFile, type ProfileFile } from "./src/seatbelt.ts";
 import { registerToolGuard } from "./src/tool-guard.ts";
+import { cwdRefusalReasonForRuntime, resolveSessionRoot } from "./src/workspace.ts";
 
 type RuntimeState = "disabled" | "active" | "fail-closed" | "degraded";
 
@@ -23,7 +24,7 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
   let policy: PathPolicy | undefined;
   let profile: ProfileFile | undefined;
   let config: SeatbeltConfig = DEFAULT_CONFIG;
-  let lastCwd = process.cwd();
+  let sessionRoot = resolveSessionRoot(process.cwd());
   let failureReason: string | undefined;
 
   const baseBash = createBashTool(process.cwd());
@@ -32,6 +33,9 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
     ...baseBash,
     label: "bash (seatbelt)",
     async execute(id, params, signal, onUpdate, ctx) {
+      const cwdDriftReason = rejectCwdOutsideSession(ctx.cwd);
+      if (cwdDriftReason) return bashDisabledResult(cwdDriftReason);
+
       const localBash = createBashTool(ctx.cwd);
       if (state === "active" && profile) {
         const sandboxedBash = createBashTool(ctx.cwd, { operations: createSeatbeltBashOperations(profile.path) });
@@ -42,12 +46,12 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
     },
   });
 
-  pi.on("user_bash", () => {
+  pi.on("user_bash", (event) => {
+    const cwdDriftReason = rejectCwdOutsideSession(event.cwd);
+    if (cwdDriftReason) return { result: bashRefusedCommandResult(cwdDriftReason) };
+
     if (state === "active" && profile) return { operations: createSeatbeltBashOperations(profile.path) };
-    if (state === "fail-closed") {
-      const output = `${FAIL_CLOSED_MESSAGE}${failureReason ? ` (${failureReason})` : ""}\n`;
-      return { result: { output, exitCode: 126, cancelled: false, truncated: false } };
-    }
+    if (state === "fail-closed") return { result: bashRefusedCommandResult(failureReason) };
   });
 
   registerToolGuard(pi, {
@@ -56,13 +60,13 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
   });
 
   pi.on("session_start", async (_event, ctx) => {
-    lastCwd = ctx.cwd;
+    sessionRoot = resolveSessionRoot(ctx.cwd);
     await disposeProfile();
     policy = undefined;
     failureReason = undefined;
 
     try {
-      config = loadConfig(ctx.cwd);
+      config = loadConfig(sessionRoot);
     } catch (error) {
       config = { ...DEFAULT_CONFIG, readable: [], writable: [], denyRead: [], denyWrite: [], network: { mode: "none" } };
       failClosed(ctx, errorMessage(error));
@@ -119,7 +123,7 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
           return;
         }
         try {
-          const expanded = expandConfigPath(value, { cwd: ctx.cwd });
+          const expanded = expandConfigPath(value, { cwd: sessionRoot });
           config =
             cmd === "allow-read"
               ? { ...config, readable: [...config.readable, expanded] }
@@ -159,7 +163,7 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
     }
 
     try {
-      policy = buildPolicy(config, lastCwd);
+      policy = buildPolicy(config, sessionRoot);
       profile = await createProfileFile({
         readable: config.readable,
         writable: config.writable,
@@ -192,6 +196,10 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
     ctx.ui.notify(`${FAIL_CLOSED_MESSAGE}: ${reason}`, "error");
   }
 
+  function rejectCwdOutsideSession(cwd: string): string | undefined {
+    return cwdRefusalReasonForRuntime(state, cwd, sessionRoot);
+  }
+
   async function disposeProfile(): Promise<void> {
     const old = profile;
     profile = undefined;
@@ -203,6 +211,8 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
       "Seatbelt sandbox:",
       `  state: ${state}${failureReason ? ` (${failureReason})` : ""}`,
       `  network: ${config.network.mode}`,
+      `  workspace: ${sessionRoot}`,
+      `  cwd binding: bash is refused outside the session workspace while seatbelt is enabled`,
       `  profile: ${profile?.path ?? "(none)"}`,
       "",
       "Readable roots:",
@@ -223,6 +233,15 @@ function bashDisabledResult(reason?: string) {
     content: [{ type: "text" as const, text: `${FAIL_CLOSED_MESSAGE}${reason ? ` (${reason})` : ""}` }],
     details: undefined,
     terminate: true,
+  };
+}
+
+function bashRefusedCommandResult(reason?: string) {
+  return {
+    output: `${FAIL_CLOSED_MESSAGE}${reason ? ` (${reason})` : ""}\n`,
+    exitCode: 126,
+    cancelled: false,
+    truncated: false,
   };
 }
 

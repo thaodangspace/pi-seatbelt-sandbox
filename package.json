@@ -24,13 +24,17 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "vitest --run",
+    "test": "vitest --run --pool=threads",
+    "test:unit": "vitest --run --pool=threads --exclude test/integration.sandbox.test.ts",
+    "test:integration": "vitest --run --pool=threads test/integration.sandbox.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "files": [
     "index.ts",
     "src",
-    "README.md"
+    "README.md",
+    "LICENSE",
+    "RELEASE.md"
   ],
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.80.0"
