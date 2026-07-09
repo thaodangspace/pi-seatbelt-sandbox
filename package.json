@@ -1,0 +1,49 @@
+{
+  "name": "pi-seatbelt-sandbox",
+  "version": "0.1.0",
+  "description": "macOS Seatbelt sandbox extension package for pi bash and file-tool access controls.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "seatbelt",
+    "sandbox",
+    "macos"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dtonair/pi-seatbelt-sandbox.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dtonair/pi-seatbelt-sandbox/issues"
+  },
+  "homepage": "https://github.com/dtonair/pi-seatbelt-sandbox#readme",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "vitest --run",
+    "typecheck": "tsc --noEmit"
+  },
+  "files": [
+    "index.ts",
+    "src",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.80.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.80.0",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0",
+    "vitest": "^4.0.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
