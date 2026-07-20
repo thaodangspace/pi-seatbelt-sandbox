@@ -8,15 +8,21 @@ import { describe, expect, it } from "vitest";
 import { createSeatbeltBashOperations } from "../src/bash.ts";
 import { createProfileFile } from "../src/seatbelt.ts";
 
-const hasSandboxExec = process.platform === "darwin" && (() => {
+const sandboxUnavailableReason = (() => {
+  if (process.platform !== "darwin") return `macOS Seatbelt required (platform: ${process.platform})`;
   try {
-    execFileSync("/usr/bin/which", ["sandbox-exec"], { stdio: "ignore" });
-    return true;
+    execFileSync(
+      "/usr/bin/sandbox-exec",
+      ["-p", "(version 1) (allow default)", "/usr/bin/true"],
+      { stdio: "ignore" },
+    );
+    return undefined;
   } catch {
-    return false;
+    return "/usr/bin/sandbox-exec is unavailable or cannot apply a probe profile";
   }
 })();
-
+const hasSandboxExec = sandboxUnavailableReason === undefined;
+if (sandboxUnavailableReason) console.info(`Skipping Seatbelt integration: ${sandboxUnavailableReason}`);
 const runIf = hasSandboxExec ? describe : describe.skip;
 
 runIf("sandbox-exec integration", () => {

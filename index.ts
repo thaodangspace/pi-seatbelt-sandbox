@@ -12,6 +12,9 @@ import { cwdRefusalReasonForRuntime, resolveSessionRoot } from "./src/workspace.
 type RuntimeState = "disabled" | "active" | "fail-closed" | "degraded";
 
 const FAIL_CLOSED_MESSAGE = "bash is disabled: Seatbelt sandbox unavailable";
+export const SHARED_PROFILE_ENV = "PI_SEATBELT_PROFILE";
+export const SHARED_PROFILE_SCOPE_ENV = "PI_SEATBELT_PROFILE_SCOPE";
+export const SHARED_PROFILE_SCOPE = "tool-subprocess-v1";
 
 export default function seatbeltSandbox(pi: ExtensionAPI) {
   pi.registerFlag("no-seatbelt", {
@@ -171,6 +174,10 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
         denyWrite: config.denyWrite,
         network: config.network.mode,
       });
+      // Trusted extensions such as Chronos can launch their subprocesses under
+      // this exact profile instead of composing a second, narrower sandbox.
+      process.env[SHARED_PROFILE_ENV] = profile.path;
+      process.env[SHARED_PROFILE_SCOPE_ENV] = SHARED_PROFILE_SCOPE;
       state = "active";
       ctx.ui.setStatus("seatbelt", `🔒 seatbelt: net=${config.network.mode}`);
       ctx.ui.notify("Seatbelt sandbox initialized", "info");
@@ -203,6 +210,12 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
   async function disposeProfile(): Promise<void> {
     const old = profile;
     profile = undefined;
+    if (old && process.env[SHARED_PROFILE_ENV] === old.path) {
+      delete process.env[SHARED_PROFILE_ENV];
+    }
+    if (old && process.env[SHARED_PROFILE_SCOPE_ENV] === SHARED_PROFILE_SCOPE) {
+      delete process.env[SHARED_PROFILE_SCOPE_ENV];
+    }
     if (old) await old.dispose();
   }
 

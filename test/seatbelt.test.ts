@@ -4,12 +4,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ConfigError, DEFAULT_CONFIG, expandConfigPath } from "../src/config.ts";
+import { SHARED_PROFILE_ENV, SHARED_PROFILE_SCOPE, SHARED_PROFILE_SCOPE_ENV } from "../index.ts";
 import { createProfileFile, renderSeatbeltProfile, type ProfileFile } from "../src/seatbelt.ts";
 
 let profile: ProfileFile | undefined;
 afterEach(async () => {
   await profile?.dispose();
   profile = undefined;
+});
+
+describe("shared profile contract", () => {
+  it("publishes a versioned tool-subprocess scope", () => {
+    expect(SHARED_PROFILE_ENV).toBe("PI_SEATBELT_PROFILE");
+    expect(SHARED_PROFILE_SCOPE_ENV).toBe("PI_SEATBELT_PROFILE_SCOPE");
+    expect(SHARED_PROFILE_SCOPE).toBe("tool-subprocess-v1");
+  });
 });
 
 describe("renderSeatbeltProfile", () => {

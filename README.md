@@ -64,6 +64,8 @@ Layer A (`bash` and user `!`) is OS-enforced by macOS Seatbelt. Layer B (`read`/
 
 Pi extension code is unsandboxed and runs with full user privileges. This extension does not automatically sandbox arbitrary extension code, MCP tools, or custom tools unless they explicitly route execution through this extension's sandboxed bash operations and/or implement equivalent path checks.
 
+While active, the extension publishes its private profile path as `PI_SEATBELT_PROFILE` and the versioned marker `PI_SEATBELT_PROFILE_SCOPE=tool-subprocess-v1` in the Pi process environment. This profile is tied to the current interactive session/workspace and is intended only for tool subprocesses; it is not a portable whole-Pi or global scheduler policy. Global schedulers must create independent run-specific policies. The extension removes only values still owned by that profile instance before disposal; consumers must fail closed if the path or scope marker is absent or unreadable. Reusing this profile does not grant access beyond its configured filesystem and network rules.
+
 `localhost` network mode uses Seatbelt loopback rules. Integration tests pass on macOS 26.3.1 (build 25D771280a): loopback succeeds and public egress is blocked.
 
 ## Testing and release
