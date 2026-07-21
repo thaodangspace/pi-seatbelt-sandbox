@@ -7,7 +7,7 @@ macOS-only Pi extension that runs `bash` (agent and user `!`) through `sandbox-e
 ```bash
 pi install npm:pi-seatbelt-sandbox
 # or directly from GitHub:
-pi install git:github.com/dtonair/pi-seatbelt-sandbox
+pi install git:github.com/thaodangspace/pi-seatbelt-sandbox
 ```
 
 For a one-off local run from this checkout:

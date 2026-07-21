@@ -14,12 +14,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dtonair/pi-seatbelt-sandbox.git"
+    "url": "git+https://github.com/thaodangspace/pi-seatbelt-sandbox.git"
   },
   "bugs": {
-    "url": "https://github.com/dtonair/pi-seatbelt-sandbox/issues"
+    "url": "https://github.com/thaodangspace/pi-seatbelt-sandbox/issues"
   },
-  "homepage": "https://github.com/dtonair/pi-seatbelt-sandbox#readme",
+  "homepage": "https://github.com/thaodangspace/pi-seatbelt-sandbox#readme",
   "engines": {
     "node": ">=20"
   },
