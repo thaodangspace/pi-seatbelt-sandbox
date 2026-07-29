@@ -143,7 +143,7 @@ runIf("sandbox-exec integration", () => {
 
   it("blocks a dangling final symlink to a nonexistent external target", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "seatbelt-dangling-link-"));
-    const outside = mkdtempSync(join(tmpdir(), "seatbelt-dangling-link-out-"));
+    const outside = mkdtempSync(join(homedir(), ".seatbelt-dangling-link-out-"));
     const outsideFile = join(outside, "not-created.txt");
     symlinkSync(outsideFile, join(cwd, "link"));
     const profile = await createProfileFile({ readable: [cwd, "/bin", "/usr", "/System", "/Library", "/etc", "/private/etc", "/dev/null", "/dev/urandom"], writable: [cwd], denyRead: [], denyWrite: [], network: "none" });
