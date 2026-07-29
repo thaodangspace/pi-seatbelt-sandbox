@@ -41,7 +41,7 @@ runIf("sandbox-exec integration", () => {
 
   it("allows workspace writes but blocks .env and outside writes", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "seatbelt-int-"));
-    const outside = join(homedir(), `.seatbelt-out-${Date.now()}`);
+    const outside = mkdtempSync(join(homedir(), ".seatbelt-out-"));
     const profile = await createProfileFile({ readable: [cwd, "/bin", "/usr", "/System", "/Library", "/etc", "/private/etc", "/dev/null", "/dev/urandom"], writable: [cwd, tmpdir()], denyRead: [], denyWrite: [join(cwd, ".env")], network: "none" });
     try {
       const ops = createSeatbeltBashOperations(profile.path);
@@ -50,6 +50,25 @@ runIf("sandbox-exec integration", () => {
       expect((await ops.exec(`echo no > ${JSON.stringify(join(outside, "x"))}`, cwd, { onData() {} })).exitCode).not.toBe(0);
     } finally {
       await profile.dispose();
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps its reusable profile immutable across commands", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "seatbelt-profile-"));
+    const outside = mkdtempSync(join(homedir(), ".seatbelt-profile-out-"));
+    const outsideFile = join(outside, "escaped.txt");
+    const profile = await createProfileFile({ readable: [cwd, "/bin", "/usr", "/System", "/Library", "/etc", "/private/etc", "/dev/null", "/dev/urandom"], writable: [cwd, tmpdir()], denyRead: [], denyWrite: [], network: "none" });
+    try {
+      const ops = createSeatbeltBashOperations(profile.path);
+      const env = { ...process.env, PI_SEATBELT_PROFILE: profile.path };
+
+      expect((await ops.exec('printf "(version 1) (allow default)\\n" > "$PI_SEATBELT_PROFILE"', cwd, { onData() {}, env })).exitCode).not.toBe(0);
+      expect((await ops.exec(`echo no > ${JSON.stringify(outsideFile)}`, cwd, { onData() {}, env })).exitCode).not.toBe(0);
+      expect(existsSync(outsideFile)).toBe(false);
+    } finally {
+      await profile.dispose();
+      rmSync(outside, { recursive: true, force: true });
     }
   });
 
@@ -116,6 +135,22 @@ runIf("sandbox-exec integration", () => {
       const ops = createSeatbeltBashOperations(profile.path);
       expect((await ops.exec("echo no > link/escaped.txt", cwd, { onData() {} })).exitCode).not.toBe(0);
       expect(existsSync(join(outside, "target", "escaped.txt"))).toBe(false);
+    } finally {
+      await profile.dispose();
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks a dangling final symlink to a nonexistent external target", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "seatbelt-dangling-link-"));
+    const outside = mkdtempSync(join(tmpdir(), "seatbelt-dangling-link-out-"));
+    const outsideFile = join(outside, "not-created.txt");
+    symlinkSync(outsideFile, join(cwd, "link"));
+    const profile = await createProfileFile({ readable: [cwd, "/bin", "/usr", "/System", "/Library", "/etc", "/private/etc", "/dev/null", "/dev/urandom"], writable: [cwd], denyRead: [], denyWrite: [], network: "none" });
+    try {
+      const ops = createSeatbeltBashOperations(profile.path);
+      expect((await ops.exec("echo no > link", cwd, { onData() {} })).exitCode).not.toBe(0);
+      expect(existsSync(outsideFile)).toBe(false);
     } finally {
       await profile.dispose();
       rmSync(outside, { recursive: true, force: true });

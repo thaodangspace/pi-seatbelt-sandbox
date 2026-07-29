@@ -1,4 +1,4 @@
-import { realpathSync } from "node:fs";
+import { lstatSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { SeatbeltConfig } from "./config.ts";
 
@@ -42,7 +42,7 @@ function stripTrailingSep(path: string): string {
 }
 
 function containsGlob(path: string): boolean {
-  return /[*?[]/.test(path);
+  return /[*?]/.test(path);
 }
 
 function normalizeForRegex(path: string): string {
@@ -134,7 +134,53 @@ function matchesRule(path: string, rule: PathRule): boolean {
   return isInside(path, rule.value);
 }
 
+function canonicalAliasTarget(path: string, allowRules: PathRule[]): string | undefined {
+  // A symbolic link inside an allowed root is always rejected. The narrow
+  // exception below exists for platform aliases such as /var -> /private/var,
+  // which must be resolved before reaching the configured root on macOS.
+  if (allowRules.some((rule) => {
+    const root = rule.glob ? rule.prefix : rule.value;
+    return root !== undefined && isInside(path, root);
+  })) {
+    return undefined;
+  }
+
+  try {
+    const target = realpathSync(path);
+    return allowRules.some((rule) => {
+      const root = rule.glob ? rule.prefix : rule.value;
+      return root !== undefined && isInside(root, target);
+    })
+      ? target
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function assertNoSymlinkInWritePath(path: string, cwd: string, allowRules: PathRule[]): void {
+  const absolute = isAbsolute(path) ? resolve(path) : resolve(cwd, path);
+  const components = absolute.split(sep).filter(Boolean);
+  let current: string = sep;
+
+  for (const component of components) {
+    current = join(current, component);
+    try {
+      if (lstatSync(current).isSymbolicLink()) {
+        const target = canonicalAliasTarget(current, allowRules);
+        if (!target) throw new Error(`seatbelt policy blocked write for ${absolute}: path contains symbolic link ${current}`);
+        current = target;
+      }
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") break;
+      if (error instanceof Error && error.message.startsWith("seatbelt policy blocked")) throw error;
+      throw new Error(`seatbelt policy blocked write for ${absolute}: cannot safely inspect path component ${current}`);
+    }
+  }
+}
+
 function assertAllowed(path: string, policy: PathPolicy, denyRules: PathRule[], allowRules: PathRule[], mode: "read" | "write"): void {
+  if (mode === "write") assertNoSymlinkInWritePath(path, policy.cwd, allowRules);
   const target = canon(path, policy.cwd);
   const deny = denyRules.find((rule) => matchesRule(target, rule));
   if (deny) throw new Error(`seatbelt policy blocked ${mode} for ${target}: denied by ${deny.raw}`);

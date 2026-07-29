@@ -9,7 +9,14 @@ import { createProfileFile, type ProfileFile } from "./src/seatbelt.ts";
 import { registerToolGuard } from "./src/tool-guard.ts";
 import { cwdRefusalReasonForRuntime, resolveSessionRoot } from "./src/workspace.ts";
 
-type RuntimeState = "disabled" | "active" | "fail-closed" | "degraded";
+export type RuntimeState = "disabled" | "initializing" | "active" | "fail-closed" | "degraded";
+export type BashRuntimeRoute = "local" | "sandboxed" | "refused";
+
+export function bashRuntimeRoute(state: RuntimeState, hasProfile: boolean): BashRuntimeRoute {
+  if (state === "disabled" || state === "degraded") return "local";
+  if (state === "active" && hasProfile) return "sandboxed";
+  return "refused";
+}
 
 const FAIL_CLOSED_MESSAGE = "bash is disabled: Seatbelt sandbox unavailable";
 export const SHARED_PROFILE_ENV = "PI_SEATBELT_PROFILE";
@@ -39,13 +46,13 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
       const cwdDriftReason = rejectCwdOutsideSession(ctx.cwd);
       if (cwdDriftReason) return bashDisabledResult(cwdDriftReason);
 
-      const localBash = createBashTool(ctx.cwd);
-      if (state === "active" && profile) {
-        const sandboxedBash = createBashTool(ctx.cwd, { operations: createSeatbeltBashOperations(profile.path) });
+      const route = bashRuntimeRoute(state, profile !== undefined);
+      if (route === "local") return createBashTool(ctx.cwd).execute(id, params, signal, onUpdate);
+      if (route === "sandboxed") {
+        const sandboxedBash = createBashTool(ctx.cwd, { operations: createSeatbeltBashOperations(profile!.path) });
         return sandboxedBash.execute(id, params, signal, onUpdate);
       }
-      if (state === "fail-closed") return bashDisabledResult(failureReason);
-      return localBash.execute(id, params, signal, onUpdate);
+      return bashDisabledResult(failureReason ?? "sandbox profile unavailable");
     },
   });
 
@@ -53,43 +60,32 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
     const cwdDriftReason = rejectCwdOutsideSession(event.cwd);
     if (cwdDriftReason) return { result: bashRefusedCommandResult(cwdDriftReason) };
 
-    if (state === "active" && profile) return { operations: createSeatbeltBashOperations(profile.path) };
-    if (state === "fail-closed") return { result: bashRefusedCommandResult(failureReason) };
+    const route = bashRuntimeRoute(state, profile !== undefined);
+    if (route === "local") return;
+    if (route === "sandboxed") return { operations: createSeatbeltBashOperations(profile!.path) };
+    return { result: bashRefusedCommandResult(failureReason ?? "sandbox profile unavailable") };
   });
 
   registerToolGuard(pi, {
-    isActive: () => state === "active",
+    isActive: () => state !== "disabled" && state !== "degraded",
     getPolicy: () => policy,
   });
 
   pi.on("session_start", async (_event, ctx) => {
     sessionRoot = resolveSessionRoot(ctx.cwd);
-    await disposeProfile();
-    policy = undefined;
-    failureReason = undefined;
-
-    try {
-      config = loadConfig(sessionRoot);
-    } catch (error) {
-      config = { ...DEFAULT_CONFIG, readable: [], writable: [], denyRead: [], denyWrite: [], network: { mode: "none" } };
-      failClosed(ctx, errorMessage(error));
-      return;
-    }
-
-    if (!config.enabled || pi.getFlag("no-seatbelt") === true) {
-      state = "disabled";
-      ctx.ui.setStatus("seatbelt", "seatbelt: disabled");
-      ctx.ui.notify("Seatbelt sandbox disabled", "warning");
-      return;
-    }
-
-    await activate(ctx);
+    await activate(ctx, true);
   });
 
   pi.on("session_shutdown", async () => {
-    await disposeProfile();
+    state = "initializing";
     policy = undefined;
-    state = "disabled";
+    try {
+      await disposeProfile();
+      state = "disabled";
+    } catch (error) {
+      failureReason = errorMessage(error);
+      state = "fail-closed";
+    }
   });
 
   pi.registerCommand("seatbelt", {
@@ -139,33 +135,50 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
         return;
       }
       case "off":
-        await disposeProfile();
+        state = "initializing";
         policy = undefined;
-        failureReason = "disabled by /seatbelt off";
-        state = config.failClosed ? "fail-closed" : "degraded";
-        ctx.ui.setStatus("seatbelt", config.failClosed ? "seatbelt: off (bash refused)" : "seatbelt: off (unsandboxed)");
-        ctx.ui.notify(config.failClosed ? "Seatbelt disabled; failClosed=true so bash will be refused" : "Seatbelt disabled; bash will run unsandboxed", config.failClosed ? "warning" : "info");
+        failureReason = undefined;
+        try {
+          await disposeProfile();
+          failureReason = "disabled by /seatbelt off";
+          state = config.failClosed ? "fail-closed" : "degraded";
+          ctx.ui.setStatus("seatbelt", config.failClosed ? "seatbelt: off (bash refused)" : "seatbelt: off (unsandboxed)");
+          ctx.ui.notify(config.failClosed ? "Seatbelt disabled; failClosed=true so bash will be refused" : "Seatbelt disabled; bash will run unsandboxed", config.failClosed ? "warning" : "info");
+        } catch (error) {
+          failClosed(ctx, errorMessage(error));
+        }
         return;
       default:
         ctx.ui.notify("Usage: /seatbelt [network none|localhost|all | allow-read <path> | allow-write <path> | off]", "error");
     }
   }
 
-  async function activate(ctx: Pick<ExtensionContext, "ui">): Promise<void> {
-    await disposeProfile();
+  async function activate(ctx: Pick<ExtensionContext, "ui">, reloadConfig = false): Promise<void> {
+    // Every transition first refuses commands. No path may run local bash while
+    // an old profile is being disposed or a replacement is being created.
+    state = "initializing";
     policy = undefined;
     failureReason = undefined;
 
-    if (process.platform !== "darwin") {
-      unavailable(ctx, `macOS only (current platform: ${process.platform})`);
-      return;
-    }
-    if (!which("sandbox-exec")) {
-      unavailable(ctx, "sandbox-exec not found in PATH");
-      return;
-    }
-
     try {
+      await disposeProfile();
+      if (reloadConfig) config = loadConfig(sessionRoot);
+
+      if (!config.enabled || pi.getFlag("no-seatbelt") === true) {
+        state = "disabled";
+        ctx.ui.setStatus("seatbelt", "seatbelt: disabled");
+        ctx.ui.notify("Seatbelt sandbox disabled", "warning");
+        return;
+      }
+      if (process.platform !== "darwin") {
+        unavailable(ctx, `macOS only (current platform: ${process.platform})`);
+        return;
+      }
+      if (!which("sandbox-exec")) {
+        unavailable(ctx, "sandbox-exec not found in PATH");
+        return;
+      }
+
       policy = buildPolicy(config, sessionRoot);
       profile = await createProfileFile({
         readable: config.readable,
@@ -182,6 +195,11 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
       ctx.ui.setStatus("seatbelt", `🔒 seatbelt: net=${config.network.mode}`);
       ctx.ui.notify("Seatbelt sandbox initialized", "info");
     } catch (error) {
+      try {
+        await disposeProfile();
+      } catch {
+        // The runtime is already fail-closed; retain the original failure.
+      }
       failClosed(ctx, errorMessage(error));
     }
   }
