@@ -1,6 +1,6 @@
 {
   "name": "pi-seatbelt-sandbox",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "macOS Seatbelt sandbox extension package for pi bash and file-tool access controls.",
   "type": "module",
   "license": "MIT",
@@ -21,7 +21,7 @@
   },
   "homepage": "https://github.com/thaodangspace/pi-seatbelt-sandbox#readme",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.19.0"
   },
   "scripts": {
     "test": "vitest --run --pool=threads",

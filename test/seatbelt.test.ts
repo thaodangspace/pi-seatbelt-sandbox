@@ -36,10 +36,22 @@ describe("renderSeatbeltProfile", () => {
     expect(text).toContain("(allow network*)");
   });
 
-  it("omits glob paths from the OS profile", () => {
-    const text = renderSeatbeltProfile({ readable: ["/tmp/**/*.pem"], writable: [], denyRead: ["/tmp/*.key"], denyWrite: [], network: "none" });
+  it("omits only documented glob paths from the OS profile", () => {
+    const text = renderSeatbeltProfile({ readable: ["/tmp/**/*.pem"], writable: [], denyRead: ["/tmp/*.key"], denyWrite: ["/tmp/archive[old]"], network: "none" });
     expect(text).not.toContain("*.pem");
     expect(text).not.toContain("*.key");
+    expect(text).toContain("/tmp/archive[old]");
+  });
+
+  it("renders profile-directory protection after user filesystem rules", () => {
+    const text = renderSeatbeltProfile({ readable: ["/tmp"], writable: ["/tmp"], denyRead: [], denyWrite: ["/tmp/.env"], network: "none" }, "/tmp/pi-seatbelt-private");
+    const configuredDeny = text.indexOf("/tmp/.env");
+    const profileDeny = text.lastIndexOf("(deny file-write*");
+    const profileDirectory = text.indexOf("/tmp/pi-seatbelt-private");
+
+    expect(profileDeny).toBeGreaterThan(text.indexOf("(allow file-write*"));
+    expect(profileDeny).toBeGreaterThan(configuredDeny);
+    expect(profileDirectory).toBeGreaterThan(profileDeny);
   });
 });
 

@@ -37,14 +37,14 @@ Example:
 }
 ```
 
-Variables supported in path lists: `${WORKSPACE}`, `${HOME}`, `${TMPDIR}`. Unknown variables are config errors.
+Variables supported in path lists: `${WORKSPACE}`, `${HOME}`, `${TMPDIR}`. Unknown variables are config errors. Existing configuration files are validated before merging: unreadable files, invalid JSON, unknown keys, invalid nested objects, and unsupported values are configuration errors that put the session into fail-closed mode; the UI reports the source filename.
 
 Path semantics:
 
 - Non-glob paths are treated as subpath roots.
-- Globs using `*`, `?`, and `**` are honored exactly by the in-process file-tool policy. For example, `src/**/*.ts` allows matching TypeScript files but does not allow `src/other.txt`.
+- Globs using `*`, `?`, and `**` are honored exactly by the in-process file-tool policy. For example, `src/**/*.ts` allows matching TypeScript files but does not allow `src/other.txt`. Square brackets are literal path characters, not glob syntax.
 - Seatbelt itself does not understand globs; glob paths are omitted from the OS profile. Use non-glob readable/writable roots for OS-enforced bash access, and globs mainly to narrow or deny built-in file-tool access.
-- Guarded file tools (`read`, `grep`, `find`, `ls`, `write`, `edit`) are blocked when their `path` input is missing, empty, or not a string.
+- Guarded file tools (`read`, `grep`, `find`, `ls`, `write`, `edit`) are blocked when their `path` input is missing, empty, or not a string. Write paths containing symbolic links are also rejected, except canonical platform aliases needed to reach a configured root (for example, macOS `/var` → `/private/var`). This is a preflight check and cannot eliminate races with later filesystem changes.
 
 ## Commands
 
@@ -64,7 +64,7 @@ Layer A (`bash` and user `!`) is OS-enforced by macOS Seatbelt. Layer B (`read`/
 
 Pi extension code is unsandboxed and runs with full user privileges. This extension does not automatically sandbox arbitrary extension code, MCP tools, or custom tools unless they explicitly route execution through this extension's sandboxed bash operations and/or implement equivalent path checks.
 
-While active, the extension publishes its private profile path as `PI_SEATBELT_PROFILE` and the versioned marker `PI_SEATBELT_PROFILE_SCOPE=tool-subprocess-v1` in the Pi process environment. This profile is tied to the current interactive session/workspace and is intended only for tool subprocesses; it is not a portable whole-Pi or global scheduler policy. Global schedulers must create independent run-specific policies. The extension removes only values still owned by that profile instance before disposal; consumers must fail closed if the path or scope marker is absent or unreadable. Reusing this profile does not grant access beyond its configured filesystem and network rules.
+While active, the extension publishes its private profile path as `PI_SEATBELT_PROFILE` and the versioned marker `PI_SEATBELT_PROFILE_SCOPE=tool-subprocess-v1` in the Pi process environment. This profile is tied to the current interactive session/workspace and is intended only for tool subprocesses; it is not a portable whole-Pi or global scheduler policy. Global schedulers must create independent run-specific policies. The extension removes only values still owned by that profile instance before disposal; consumers must fail closed if the path or scope marker is absent or unreadable. The generated policy adds a final internal write deny for its exact profile directory, so a sandboxed subprocess cannot replace the reusable profile even when temporary storage is otherwise writable.
 
 `localhost` network mode uses Seatbelt loopback rules. Integration tests pass on macOS 26.3.1 (build 25D771280a): loopback succeeds and public egress is blocked.
 

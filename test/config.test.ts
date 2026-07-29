@@ -64,19 +64,37 @@ describe("config loading", () => {
     expect(loaded.writable).toEqual([join(realWorkspace, "global-write")]);
   });
 
-  it("ignores malformed override files and keeps defaults", () => {
+  it.each([
+    ["invalid JSON", "{ nope", /invalid JSON/],
+    ["non-object root", "[]", /configuration must be an object/],
+    ["unknown key", '{"unknown":true}', /unknown key unknown/],
+    ["invalid path list", '{"writable":"workspace"}', /writable must be an array of strings/],
+    ["network string", '{"network":"none"}', /network must be an object/],
+    ["network null", '{"network":null}', /network must be an object/],
+    ["unknown network key", '{"network":{"mode":"none","extra":true}}', /unknown network key extra/],
+    ["unsupported network mode", '{"network":{"mode":"internet"}}', /network\.mode must be one of/],
+  ])("fails closed for %s project overrides", (_name, contents, expected) => {
     const agentDir = tempDir("seatbelt-agent-");
     const workspace = tempDir("seatbelt-workspace-");
     process.env.PI_CODING_AGENT_DIR = agentDir;
 
     mkdirSync(join(workspace, CONFIG_DIR_NAME), { recursive: true });
-    writeFileSync(join(workspace, CONFIG_DIR_NAME, "seatbelt.json"), "{ nope");
+    const path = join(workspace, CONFIG_DIR_NAME, "seatbelt.json");
+    writeFileSync(path, contents);
 
-    const loaded = loadConfig(workspace);
+    expect(() => loadConfig(workspace)).toThrow(expected);
+    expect(() => loadConfig(workspace)).toThrow(path);
+  });
 
-    expect(loaded.enabled).toBe(DEFAULT_CONFIG.enabled);
-    expect(loaded.failClosed).toBe(DEFAULT_CONFIG.failClosed);
-    expect(loaded.network.mode).toBe(DEFAULT_CONFIG.network.mode);
-    expect(loaded.readable).toContain(realpathSync(workspace));
+  it("fails closed when an existing override cannot be read", () => {
+    const agentDir = tempDir("seatbelt-agent-");
+    const workspace = tempDir("seatbelt-workspace-");
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+
+    mkdirSync(join(workspace, CONFIG_DIR_NAME, "seatbelt.json"), { recursive: true });
+    const path = join(workspace, CONFIG_DIR_NAME, "seatbelt.json");
+
+    expect(() => loadConfig(workspace)).toThrow(/could not read configuration/);
+    expect(() => loadConfig(workspace)).toThrow(path);
   });
 });

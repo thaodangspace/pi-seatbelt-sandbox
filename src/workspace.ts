@@ -1,6 +1,6 @@
 import { canon, isInside } from "./policy.ts";
 
-export type CwdBoundRuntimeState = "disabled" | "active" | "fail-closed" | "degraded";
+export type CwdBoundRuntimeState = "disabled" | "initializing" | "active" | "fail-closed" | "degraded";
 
 export function resolveSessionRoot(cwd: string): string {
   return canon(cwd);

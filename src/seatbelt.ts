@@ -19,7 +19,7 @@ export interface ProfileFile {
 }
 
 function hasGlob(path: string): boolean {
-  return /[*?[]/.test(path);
+  return /[*?]/.test(path);
 }
 
 export function canonicalPath(path: string): string {
@@ -59,13 +59,16 @@ function renderNetworkRules(mode: NetworkMode): string {
   }
 }
 
-export function renderSeatbeltProfile(o: SeatbeltProfileOptions): string {
+export function renderSeatbeltProfile(o: SeatbeltProfileOptions, protectedProfileDirectory?: string): string {
   const allows = [
     renderRule("allow", "file-read*", o.readable),
     renderRule("allow", "file-write*", o.writable),
     renderScratchRule(),
   ].filter(Boolean);
   const denies = [renderRule("deny", "file-read*", o.denyRead), renderRule("deny", "file-write*", o.denyWrite)].filter(Boolean);
+  const profileProtection = protectedProfileDirectory
+    ? `(deny file-write*\n  ${subpath(protectedProfileDirectory)}\n)`
+    : "";
   const network = renderNetworkRules(o.network);
 
   return [
@@ -84,6 +87,8 @@ export function renderSeatbeltProfile(o: SeatbeltProfileOptions): string {
     ``,
     `;; Deny rules are intentionally last among filesystem rules (Seatbelt is last-match-wins).`,
     ...denies,
+    `;; The reusable profile must remain immutable to sandboxed commands.`,
+    profileProtection,
     ``,
     `;; Network policy.`,
     network,
@@ -97,7 +102,7 @@ export async function createProfileFile(o: SeatbeltProfileOptions): Promise<Prof
   const dir = await mkdtemp(join(tmpdir(), "pi-seatbelt-"));
   await chmod(dir, 0o700);
   const path = join(dir, "profile.sb");
-  await writeFile(path, renderSeatbeltProfile(o), { mode: 0o600 });
+  await writeFile(path, renderSeatbeltProfile(o, dir), { mode: 0o600 });
   await chmod(path, 0o600);
 
   let disposed = false;

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
@@ -75,13 +75,64 @@ export function shallowMergeConfig(base: SeatbeltConfig, override: ConfigOverrid
   };
 }
 
+const OVERRIDE_KEYS = new Set(["enabled", "failClosed", "readable", "writable", "denyRead", "denyWrite", "network"]);
+const NETWORK_KEYS = new Set(["mode"]);
+
+function configError(path: string, message: string): ConfigError {
+  return new ConfigError(`${path}: ${message}`);
+}
+
+function validateOverride(raw: unknown, path: string): ConfigOverride {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw configError(path, "configuration must be an object");
+  }
+
+  const value = raw as Record<string, unknown>;
+  for (const key of Object.keys(value)) {
+    if (!OVERRIDE_KEYS.has(key)) throw configError(path, `unknown key ${key}`);
+  }
+
+  if ("enabled" in value && typeof value.enabled !== "boolean") throw configError(path, "enabled must be a boolean");
+  if ("failClosed" in value && typeof value.failClosed !== "boolean") throw configError(path, "failClosed must be a boolean");
+  for (const key of ["readable", "writable", "denyRead", "denyWrite"] as const) {
+    if (key in value) {
+      if (!Array.isArray(value[key]) || !value[key].every((item) => typeof item === "string")) {
+        throw configError(path, `${key} must be an array of strings`);
+      }
+    }
+  }
+
+  if ("network" in value) {
+    const network = value.network;
+    if (typeof network !== "object" || network === null || Array.isArray(network)) {
+      throw configError(path, "network must be an object");
+    }
+    const networkValue = network as Record<string, unknown>;
+    for (const key of Object.keys(networkValue)) {
+      if (!NETWORK_KEYS.has(key)) throw configError(path, `unknown network key ${key}`);
+    }
+    if (networkValue.mode !== "none" && networkValue.mode !== "localhost" && networkValue.mode !== "all") {
+      throw configError(path, 'network.mode must be one of "none", "localhost", or "all"');
+    }
+  }
+
+  return value as ConfigOverride;
+}
+
 function readOverride(path: string): ConfigOverride {
-  if (!existsSync(path)) return {};
+  let contents: string;
   try {
-    return JSON.parse(readFileSync(path, "utf8")) as ConfigOverride;
+    contents = readFileSync(path, "utf8");
   } catch (error) {
-    console.warn(`pi-seatbelt-sandbox: could not parse ${path}: ${error instanceof Error ? error.message : error}`);
-    return {};
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return {};
+    throw configError(path, `could not read configuration: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  try {
+    return validateOverride(JSON.parse(contents), path);
+  } catch (error) {
+    if (error instanceof ConfigError) throw error;
+    throw configError(path, `invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
