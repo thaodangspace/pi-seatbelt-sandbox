@@ -90,6 +90,29 @@ runIf("sandbox-exec integration", () => {
     }
   });
 
+  it("does not expose filtered parent environment through process inspection", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "seatbelt-parent-env-"));
+    const marker = `seatbelt-parent-secret-${Date.now()}-${Math.random()}`;
+    const previous = process.env.SEATBELT_PARENT_SECRET;
+    process.env.SEATBELT_PARENT_SECRET = marker;
+    const output: Buffer[] = [];
+    const profile = await createProfileFile({ readable: [cwd, "/bin", "/usr"], writable: [cwd], denyRead: [], denyWrite: [], network: "none" });
+    try {
+      const ops = createSeatbeltBashOperations(profile.path, { mode: "filtered", deny: ["SEATBELT_PARENT_SECRET"] });
+      const result = await ops.exec(`ps -E -p ${process.pid} -o command=`, cwd, {
+        onData: (chunk) => output.push(Buffer.from(chunk)),
+        env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
+      });
+      expect(result.exitCode).not.toBe(0);
+      expect(Buffer.concat(output).toString()).not.toContain(marker);
+    } finally {
+      if (previous === undefined) delete process.env.SEATBELT_PARENT_SECRET;
+      else process.env.SEATBELT_PARENT_SECRET = previous;
+      await profile.dispose();
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("allows workspace reads and blocks denied home secrets", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "seatbelt-int-"));
     writeFileSync(join(cwd, "ok.txt"), "ok");

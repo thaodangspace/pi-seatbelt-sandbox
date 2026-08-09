@@ -296,7 +296,12 @@ export function createProfileFile(o: SeatbeltProfileOptions): Promise<{
 (allow process-fork)
 (allow process-exec)
 (allow signal (target self))
-(allow sysctl-read)
+
+;; A sandboxed command must not inspect other processes. On macOS, process
+;; arguments/environment can otherwise expose the parent Pi environment.
+(deny process-info*)
+(allow process-info* (target self))
+;; Do not grant blanket sysctl-read: KERN_PROCARGS2 can expose process env.
 
 ;; Explicit filesystem policy (subpath = prefix match on canonical paths).
 (allow file-read*  <readable subpaths...>)

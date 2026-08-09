@@ -29,6 +29,14 @@ describe("renderSeatbeltProfile", () => {
     expect(text.indexOf("(deny file-write*")).toBeGreaterThan(text.indexOf("(allow file-write*"));
   });
 
+  it("denies process inspection and blanket sysctl access", () => {
+    const text = renderSeatbeltProfile({ readable: ["/tmp"], writable: [], denyRead: [], denyWrite: [], network: "none" });
+
+    expect(text).toContain("(deny process-info*)");
+    expect(text).toContain("(allow process-info* (target self))");
+    expect(text).not.toContain("sysctl-read");
+  });
+
   it("quotes paths and omits empty list rules", () => {
     const text = renderSeatbeltProfile({ readable: ["/tmp/path with spaces/quote\"x"], writable: [], denyRead: [], denyWrite: [], network: "all" });
     expect(text).toContain("path with spaces/quote\\\"x");
