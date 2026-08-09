@@ -1,12 +1,14 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ProfileFile } from "../src/seatbelt.ts";
 import { SANDBOX_EXEC_PATH } from "../src/sandbox-exec.ts";
 
 const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
 const originalPath = process.env.PATH;
+const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const tempDirs: string[] = [];
 
 afterEach(() => {
@@ -16,6 +18,8 @@ afterEach(() => {
   if (originalPlatform) Object.defineProperty(process, "platform", originalPlatform);
   if (originalPath === undefined) delete process.env.PATH;
   else process.env.PATH = originalPath;
+  if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
   for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
   tempDirs.length = 0;
 });
@@ -110,6 +114,20 @@ describe("runtime fail-closed transitions", () => {
     await runtime.start();
 
     expect(runtime.userBash()).toMatchObject({ result: { exitCode: 126, output: expect.stringMatching(/profile creation failed/) } });
+  });
+
+  it("fails closed when a project config tries to disable the sandbox", async () => {
+    const agentDir = tempDir("seatbelt-runtime-agent-");
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    const runtime = await installRuntime(() => Promise.resolve(fakeProfile()));
+    mkdirSync(join(runtime.workspace, CONFIG_DIR_NAME), { recursive: true });
+    writeFileSync(join(runtime.workspace, CONFIG_DIR_NAME, "seatbelt.json"), JSON.stringify({ enabled: false }));
+
+    await runtime.start();
+
+    expect(runtime.userBash()).toMatchObject({
+      result: { exitCode: 126, output: expect.stringMatching(/cannot disable a globally enabled sandbox/) },
+    });
   });
 
   it("fails closed when disposing the previous profile fails during reconfiguration", async () => {
