@@ -1,4 +1,4 @@
-import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -77,6 +77,27 @@ describe("config loading", () => {
   ] as const)("rejects project widening for %s", (_name, globalConfig, projectConfig, expected) => {
     const workspace = setupConfig(globalConfig, projectConfig);
     expect(() => loadConfig(workspace)).toThrow(expected);
+  });
+
+  it("rejects non-existent project paths escaping through a symlink", () => {
+    const workspace = setupConfig(
+      { writable: ["${WORKSPACE}/trusted"] },
+      { writable: ["${WORKSPACE}/trusted/link/new"] },
+    );
+    const outside = tempDir("seatbelt-outside-");
+    mkdirSync(join(workspace, "trusted"));
+    symlinkSync(outside, join(workspace, "trusted", "link"));
+
+    expect(() => loadConfig(workspace)).toThrow(/outside the trusted global allowance/);
+  });
+
+  it.each(["readable", "writable"] as const)("rejects converting a global %s glob into a project subtree", (key) => {
+    const workspace = setupConfig(
+      { [key]: ["${WORKSPACE}/build/*"] },
+      { [key]: ["${WORKSPACE}/build/pkg"] },
+    );
+
+    expect(() => loadConfig(workspace)).toThrow(/outside the trusted global allowance/);
   });
 
   it("allows stricter network mode and rejects filesystem widening", () => {

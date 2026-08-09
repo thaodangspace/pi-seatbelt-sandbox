@@ -2,6 +2,7 @@ import { readFileSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { canon } from "./policy.ts";
 import type { NetworkMode } from "./seatbelt.ts";
 
 export interface SeatbeltConfig {
@@ -186,37 +187,6 @@ function containsGlob(path: string): boolean {
   return /[*?]/.test(path);
 }
 
-function normalizeForRegex(path: string): string {
-  return path.split(sep).join("/");
-}
-
-function globToRegex(pattern: string): RegExp {
-  const normalized = normalizeForRegex(pattern);
-  let out = "^";
-  for (let i = 0; i < normalized.length; i++) {
-    const ch = normalized[i];
-    const next = normalized[i + 1];
-    if (ch === "*" && next === "*") {
-      const after = normalized[i + 2];
-      if (after === "/") {
-        out += "(?:.*/)?";
-        i += 2;
-      } else {
-        out += ".*";
-        i += 1;
-      }
-    } else if (ch === "*") {
-      out += "[^/]*";
-    } else if (ch === "?") {
-      out += "[^/]";
-    } else {
-      out += ch.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
-    }
-  }
-  out += "$";
-  return new RegExp(out);
-}
-
 function globPrefix(path: string, cwd: string): string {
   const absolute = isAbsolute(path) ? resolve(path) : resolve(cwd, path);
   const parts = absolute.split(sep);
@@ -229,7 +199,7 @@ function globPrefix(path: string, cwd: string): string {
     if (containsGlob(part)) break;
     prefix.push(part);
   }
-  return realpathOrResolve(prefix.length <= 1 ? sep : prefix.join(sep));
+  return canon(prefix.length <= 1 ? sep : prefix.join(sep), cwd);
 }
 
 function isInsidePath(child: string, root: string): boolean {
@@ -247,9 +217,12 @@ function projectPathCovered(projectPath: string, basePath: string, cwd: string):
   // A glob-to-glob subset check is deliberately conservative. An exact match
   // is safe; otherwise a project glob could hide a widening in the base glob.
   if (baseGlob && projectGlob) return projectPath === basePath;
-  if (baseGlob) return globToRegex(basePath).test(normalizeForRegex(projectPath));
-  if (projectGlob) return isInsidePath(globPrefix(projectPath, cwd), realpathOrResolve(basePath));
-  return isInsidePath(realpathOrResolve(projectPath), realpathOrResolve(basePath));
+  // A global glob is intentionally not treated as an OS-enforced subtree
+  // allowance. Project non-glob rules would be emitted as Seatbelt subpaths,
+  // which could turn a Layer-B match into a broader Layer-A privilege.
+  if (baseGlob) return false;
+  if (projectGlob) return isInsidePath(globPrefix(projectPath, cwd), canon(basePath, cwd));
+  return isInsidePath(canon(projectPath, cwd), canon(basePath, cwd));
 }
 
 function expandedRestrictionPaths(paths: string[], cwd: string, sourcePath: string, key: string): string[] {
