@@ -1,8 +1,9 @@
 import { accessSync, constants } from "node:fs";
-import { delimiter, isAbsolute, resolve } from "node:path";
+import { resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createBashTool } from "@earendil-works/pi-coding-agent";
 import { createSeatbeltBashOperations } from "./src/bash.ts";
+import { SANDBOX_EXEC_PATH } from "./src/sandbox-exec.ts";
 import { ConfigError, DEFAULT_CONFIG, expandConfigPath, loadConfig, type SeatbeltConfig } from "./src/config.ts";
 import { buildPolicy, type PathPolicy } from "./src/policy.ts";
 import { createProfileFile, type ProfileFile } from "./src/seatbelt.ts";
@@ -174,8 +175,10 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
         unavailable(ctx, `macOS only (current platform: ${process.platform})`);
         return;
       }
-      if (!which("sandbox-exec")) {
-        unavailable(ctx, "sandbox-exec not found in PATH");
+      try {
+        accessSync(SANDBOX_EXEC_PATH, constants.X_OK);
+      } catch {
+        unavailable(ctx, `${SANDBOX_EXEC_PATH} is unavailable or not executable`);
         return;
       }
 
@@ -279,20 +282,6 @@ function bashRefusedCommandResult(reason?: string) {
 function errorMessage(error: unknown): string {
   if (error instanceof ConfigError) return error.message;
   return error instanceof Error ? error.message : String(error);
-}
-
-function which(command: string): string | undefined {
-  const paths = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
-  for (const dir of paths) {
-    const candidate = isAbsolute(command) ? command : resolve(dir, command);
-    try {
-      accessSync(candidate, constants.X_OK);
-      return candidate;
-    } catch {
-      // Continue searching.
-    }
-  }
-  return undefined;
 }
 
 function splitArgs(input: string): string[] {
