@@ -27,6 +27,7 @@
     "test": "vitest --run --pool=threads",
     "test:unit": "vitest --run --pool=threads --exclude test/integration.sandbox.test.ts",
     "test:integration": "vitest --run --pool=threads test/integration.sandbox.test.ts",
+    "test:package": "node scripts/package-smoke.mjs",
     "typecheck": "tsc --noEmit"
   },
   "files": [
@@ -37,10 +38,10 @@
     "RELEASE.md"
   ],
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.80.0"
+    "@earendil-works/pi-coding-agent": ">=0.80.0 <1"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.80.0",
+    "@earendil-works/pi-coding-agent": ">=0.80.0 <1",
     "@types/node": "^24.0.0",
     "typescript": "^5.8.0",
     "vitest": "^4.0.0"
