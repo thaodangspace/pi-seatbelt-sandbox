@@ -54,8 +54,8 @@ describe("config loading", () => {
 
   it("applies project config as a restriction-only layer", () => {
     const workspace = setupConfig(
-      { failClosed: false, readable: ["${WORKSPACE}"], writable: ["${WORKSPACE}"], denyRead: ["${WORKSPACE}/global-secret"], denyWrite: ["${WORKSPACE}/global-protected"], network: { mode: "all" } },
-      { failClosed: true, readable: ["${WORKSPACE}/src"], writable: ["${WORKSPACE}/build"], denyRead: ["${WORKSPACE}/project-secret"], denyWrite: ["${WORKSPACE}/project-protected"], network: { mode: "none" } },
+      { failClosed: false, readable: ["${WORKSPACE}"], writable: ["${WORKSPACE}"], denyRead: ["${WORKSPACE}/global-secret"], denyWrite: ["${WORKSPACE}/global-protected"], environment: { mode: "inherit", deny: ["GLOBAL_TOKEN"] }, network: { mode: "all" } },
+      { failClosed: true, readable: ["${WORKSPACE}/src"], writable: ["${WORKSPACE}/build"], denyRead: ["${WORKSPACE}/project-secret"], denyWrite: ["${WORKSPACE}/project-protected"], environment: { mode: "filtered", deny: ["PROJECT_TOKEN"] }, network: { mode: "none" } },
     );
 
     const loaded = loadConfig(workspace);
@@ -67,6 +67,7 @@ describe("config loading", () => {
     expect(loaded.writable).toEqual([join(realWorkspace, "build")]);
     expect(loaded.denyRead).toEqual([join(realWorkspace, "global-secret"), join(realWorkspace, "project-secret")]);
     expect(loaded.denyWrite).toEqual([join(realWorkspace, "global-protected"), join(realWorkspace, "project-protected")]);
+    expect(loaded.environment).toEqual({ mode: "filtered", deny: ["GLOBAL_TOKEN", "PROJECT_TOKEN"] });
   });
 
   it.each([
@@ -74,6 +75,7 @@ describe("config loading", () => {
     ["failClosed", { failClosed: true }, { failClosed: false }, /cannot disable global fail-closed behavior/],
     ["network none -> all", { network: { mode: "none" } }, { network: { mode: "all" } }, /widen network mode from none to all/],
     ["network localhost -> all", { network: { mode: "localhost" } }, { network: { mode: "all" } }, /widen network mode from localhost to all/],
+    ["environment filtered -> inherit", { environment: { mode: "filtered" } }, { environment: { mode: "inherit" } }, /widen environment mode from filtered to inherit/],
   ] as const)("rejects project widening for %s", (_name, globalConfig, projectConfig, expected) => {
     const workspace = setupConfig(globalConfig, projectConfig);
     expect(() => loadConfig(workspace)).toThrow(expected);
@@ -122,6 +124,9 @@ describe("config loading", () => {
     ["unknown key", '{"unknown":true}', /unknown key unknown/],
     ["invalid path list", '{"writable":"workspace"}', /writable must be an array of strings/],
     ["network string", '{"network":"none"}', /network must be an object/],
+    ["environment string", '{"environment":"filtered"}', /environment must be an object/],
+    ["unknown environment key", '{"environment":{"mode":"filtered","extra":true}}', /unknown environment key extra/],
+    ["invalid environment deny list", '{"environment":{"deny":"TOKEN"}}', /environment.deny must be an array of strings/],
     ["network null", '{"network":null}', /network must be an object/],
     ["unknown network key", '{"network":{"mode":"none","extra":true}}', /unknown network key extra/],
     ["unsupported network mode", '{"network":{"mode":"internet"}}', /network\.mode must be one of/],

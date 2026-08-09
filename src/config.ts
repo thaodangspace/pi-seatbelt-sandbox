@@ -3,6 +3,7 @@ import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { canon } from "./policy.ts";
+import type { EnvironmentMode } from "./environment.ts";
 import type { NetworkMode } from "./seatbelt.ts";
 
 export interface SeatbeltConfig {
@@ -12,6 +13,7 @@ export interface SeatbeltConfig {
   writable: string[];
   denyRead: string[];
   denyWrite: string[];
+  environment: { mode: EnvironmentMode; deny: string[] };
   network: { mode: NetworkMode };
 }
 
@@ -44,6 +46,7 @@ export const DEFAULT_CONFIG: SeatbeltConfig = {
     "${HOME}/.git-credentials",
   ],
   denyWrite: ["${WORKSPACE}/.git/hooks", "${WORKSPACE}/.env", "${WORKSPACE}/.env.local"],
+  environment: { mode: "inherit", deny: [] },
   network: { mode: "localhost" },
 };
 
@@ -53,7 +56,10 @@ export class ConfigError extends Error {
   }
 }
 
-type ConfigOverride = Partial<SeatbeltConfig>;
+type ConfigOverride = Omit<Partial<SeatbeltConfig>, "environment" | "network"> & {
+  environment?: Partial<SeatbeltConfig["environment"]>;
+  network?: Partial<SeatbeltConfig["network"]>;
+};
 
 function realpathOrResolve(path: string): string {
   try {
@@ -72,11 +78,13 @@ export function shallowMergeConfig(base: SeatbeltConfig, override: ConfigOverrid
     writable: override.writable ?? base.writable,
     denyRead: override.denyRead ?? base.denyRead,
     denyWrite: override.denyWrite ?? base.denyWrite,
+    environment: { ...base.environment, ...(override.environment ?? {}) },
     network: { ...base.network, ...(override.network ?? {}) },
   };
 }
 
-const OVERRIDE_KEYS = new Set(["enabled", "failClosed", "readable", "writable", "denyRead", "denyWrite", "network"]);
+const OVERRIDE_KEYS = new Set(["enabled", "failClosed", "readable", "writable", "denyRead", "denyWrite", "environment", "network"]);
+const ENVIRONMENT_KEYS = new Set(["mode", "deny"]);
 const NETWORK_KEYS = new Set(["mode"]);
 
 function configError(path: string, message: string): ConfigError {
@@ -100,6 +108,23 @@ function validateOverride(raw: unknown, path: string): ConfigOverride {
       if (!Array.isArray(value[key]) || !value[key].every((item) => typeof item === "string")) {
         throw configError(path, `${key} must be an array of strings`);
       }
+    }
+  }
+
+  if ("environment" in value) {
+    const environment = value.environment;
+    if (typeof environment !== "object" || environment === null || Array.isArray(environment)) {
+      throw configError(path, "environment must be an object");
+    }
+    const environmentValue = environment as Record<string, unknown>;
+    for (const key of Object.keys(environmentValue)) {
+      if (!ENVIRONMENT_KEYS.has(key)) throw configError(path, `unknown environment key ${key}`);
+    }
+    if ("mode" in environmentValue && environmentValue.mode !== "inherit" && environmentValue.mode !== "filtered") {
+      throw configError(path, 'environment.mode must be one of "inherit" or "filtered"');
+    }
+    if ("deny" in environmentValue && (!Array.isArray(environmentValue.deny) || !environmentValue.deny.every((item) => typeof item === "string"))) {
+      throw configError(path, "environment.deny must be an array of strings");
     }
   }
 
@@ -151,6 +176,10 @@ function validateConfigShape(config: SeatbeltConfig): void {
   assertStringArray(config.writable, "writable");
   assertStringArray(config.denyRead, "denyRead");
   assertStringArray(config.denyWrite, "denyWrite");
+  if (!config.environment || !["inherit", "filtered"].includes(config.environment.mode)) {
+    throw new ConfigError('environment.mode must be one of "inherit" or "filtered"');
+  }
+  assertStringArray(config.environment.deny, "environment.deny");
   if (!config.network || !["none", "localhost", "all"].includes(config.network.mode)) {
     throw new ConfigError('network.mode must be one of "none", "localhost", or "all"');
   }
@@ -176,6 +205,11 @@ export function expandConfigPath(input: string, ctx: ExpansionContext): string {
 
   return isAbsolute(expanded) ? resolve(expanded) : resolve(workspace, expanded);
 }
+
+const ENVIRONMENT_STRICTNESS: Record<EnvironmentMode, number> = {
+  filtered: 0,
+  inherit: 1,
+};
 
 const NETWORK_STRICTNESS: Record<NetworkMode, number> = {
   none: 0,
@@ -259,7 +293,10 @@ export function applyProjectRestrictions(
   if (base.failClosed && override.failClosed === false) {
     throw configError(sourcePath, "project configuration cannot disable global fail-closed behavior");
   }
-  if (override.network && NETWORK_STRICTNESS[override.network.mode] > NETWORK_STRICTNESS[base.network.mode]) {
+  if (override.environment && override.environment.mode !== undefined && ENVIRONMENT_STRICTNESS[override.environment.mode] > ENVIRONMENT_STRICTNESS[base.environment.mode]) {
+    throw configError(sourcePath, `project seatbelt config attempted to widen environment mode from ${base.environment.mode} to ${override.environment.mode}`);
+  }
+  if (override.network?.mode !== undefined && NETWORK_STRICTNESS[override.network.mode] > NETWORK_STRICTNESS[base.network.mode]) {
     throw configError(sourcePath, `project seatbelt config attempted to widen network mode from ${base.network.mode} to ${override.network.mode}`);
   }
 
@@ -272,6 +309,10 @@ export function applyProjectRestrictions(
     writable: override.writable ?? base.writable,
     denyRead: [...base.denyRead, ...(override.denyRead ?? [])],
     denyWrite: [...base.denyWrite, ...(override.denyWrite ?? [])],
+    environment: {
+      mode: override.environment?.mode ?? base.environment.mode,
+      deny: [...base.environment.deny, ...(override.environment?.deny ?? [])],
+    },
     network: { mode: override.network?.mode ?? base.network.mode },
   };
 }

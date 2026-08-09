@@ -14,6 +14,30 @@ afterEach(() => {
 });
 
 describe("Seatbelt bash operations", () => {
+  it("filters the environment before spawning without mutating it", async () => {
+    Object.defineProperty(process, "platform", { configurable: true, value: "darwin" });
+    const child = new EventEmitter() as EventEmitter & {
+      pid: number;
+      stdout: EventEmitter;
+      stderr: EventEmitter;
+    };
+    child.pid = 123;
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    vi.mocked(spawn).mockImplementation(() => {
+      queueMicrotask(() => child.emit("close", 0));
+      return child as never;
+    });
+
+    const env = { PATH: "/usr/bin", PUBLIC_VALUE: "visible", SECRET_VALUE: "hidden" };
+    await createSeatbeltBashOperations("/tmp/profile.sb", { mode: "filtered", deny: ["SECRET_VALUE"] }).exec("true", process.cwd(), { onData() {}, env });
+
+    expect(env.SECRET_VALUE).toBe("hidden");
+    expect(vi.mocked(spawn).mock.calls[0]?.[2]).toEqual(expect.objectContaining({
+      env: { PATH: "/usr/bin", PUBLIC_VALUE: "visible" },
+    }));
+  });
+
   it("uses the trusted launcher even when PATH is shadowed", async () => {
     Object.defineProperty(process, "platform", { configurable: true, value: "darwin" });
     const child = new EventEmitter() as EventEmitter & {

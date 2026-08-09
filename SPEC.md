@@ -44,6 +44,8 @@ auditing that design against the real Pi API and its official
 - Linux / Windows support (explicitly macOS-only; other platforms → fail closed).
 - Domain-based network allow-listing (Seatbelt can't do it without a proxy; see
   §6.4). Network is coarse: `none` / `localhost` / `all`.
+- Environment allow-listing. Environment policy is deliberately small: `inherit`
+  or exact-name filtering via `filtered` (an allow-only mode is future work).
 - Sandboxing MCP tools or arbitrary extension code (Pi extensions run with full
   system access by design; this plugin only constrains the built-in tools).
 - Letting the **agent** change sandbox config. Only the **user** may, via slash
@@ -153,7 +155,10 @@ project may narrow the policy, but may not silently weaken it:
 - `readable` and `writable` entries must remain within the corresponding global
   allowance (a project list replaces the global list with a subset);
 - project `denyRead` and `denyWrite` entries are unioned with global denies, so
-  global deny rules cannot be removed.
+  global deny rules cannot be removed;
+- project environment policy may switch from `inherit` to `filtered`, but may
+  not switch a globally filtered policy back to `inherit`; environment deny
+  names are unioned so project config cannot remove trusted denies.
 
 Widening attempts are explicit configuration errors and fail closed. Explicit
 user actions, such as `--no-seatbelt` or `/seatbelt off`, are separate from
@@ -175,13 +180,32 @@ interface SeatbeltConfig {
   writable: string[];      // subpaths allowed for file-write*
   denyRead: string[];      // subtracted from readable
   denyWrite: string[];     // subtracted from writable
+  environment: {
+    mode: "inherit" | "filtered"; // default "inherit"
+    deny: string[];                // exact names removed in filtered mode
+  };
   network: { mode: NetworkMode };  // default "localhost"
 }
 ```
 
-### 5.3 Variable expansion (must be specified — the original omitted it)
+### 5.3 Environment policy
+
+Sandboxed subprocesses inherit the environment passed by Pi unless filtering is
+selected. Seatbelt cannot hide a process's own inherited environment, so this is
+a separate security surface from filesystem rules. `inherit` is the compatibility
+default. `filtered` copies the source environment and removes each name in
+`environment.deny` before `spawn()`; the source object is never mutated. Names
+are matched exactly, with no shell-style wildcard syntax in v1. Variables not
+listed remain available, including normal runtime/toolchain variables such as
+`PATH`, `HOME`, `TMPDIR`, `TERM`, `LANG`, `LC_*`, and `SHELL`.
+
+The `/seatbelt` status output reports the mode and count of denied names without
+printing environment values. A future `allow-only` mode is out of scope for v1.
+
+### 5.4 Variable expansion (must be specified — the original omitted it)
 Every string in `readable`/`writable`/`denyRead`/`denyWrite` is expanded before
-use, with these variables only:
+use, with these variables only. Environment deny entries are not paths and are
+not expanded:
 
 | Token          | Expands to                                             |
 |----------------|--------------------------------------------------------|
@@ -197,7 +221,7 @@ Rules:
   `subpath` prefixes only). Globs are honored only by the Layer-B policy matcher
   (§8). Document that a glob in `readable`/`writable` is ignored by the OS layer.
 
-### 5.4 Defaults (`DEFAULT_CONFIG`)
+### 5.5 Defaults (`DEFAULT_CONFIG`)
 
 ```jsonc
 {
@@ -217,6 +241,7 @@ Rules:
   "denyWrite": [
     "${WORKSPACE}/.git/hooks", "${WORKSPACE}/.env", "${WORKSPACE}/.env.local"
   ],
+  "environment": { "mode": "inherit", "deny": [] },
   "network": { "mode": "localhost" }
 }
 ```
@@ -271,7 +296,12 @@ export function createProfileFile(o: SeatbeltProfileOptions): Promise<{
 (allow process-fork)
 (allow process-exec)
 (allow signal (target self))
-(allow sysctl-read)
+
+;; A sandboxed command must not inspect other processes. On macOS, process
+;; arguments/environment can otherwise expose the parent Pi environment.
+(deny process-info*)
+(allow process-info* (target self))
+;; Do not grant blanket sysctl-read: KERN_PROCARGS2 can expose process env.
 
 ;; Explicit filesystem policy (subpath = prefix match on canonical paths).
 (allow file-read*  <readable subpaths...>)

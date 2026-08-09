@@ -35,6 +35,10 @@ Example:
   "writable": ["${WORKSPACE}", "${TMPDIR}"],
   "denyRead": ["${HOME}/.ssh", "${HOME}/.aws"],
   "denyWrite": ["${WORKSPACE}/.git/hooks", "${WORKSPACE}/.env"],
+  "environment": {
+    "mode": "filtered",
+    "deny": ["AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "NPM_TOKEN"]
+  },
   "network": { "mode": "localhost" }
 }
 ```
@@ -57,6 +61,12 @@ Path semantics:
 - `/seatbelt off` — disable for this session (`failClosed:true` refuses bash)
 
 ## Security model / known limitations
+
+Sandboxed subprocesses can read environment variables inherited from the Pi process. Filesystem deny rules do not hide secrets already present in environment variables. Until environment filtering is enabled, avoid launching Pi with unnecessary credentials in its environment.
+
+Configure `environment.mode` as `inherit` (the default, preserving current behavior) or `filtered`. In filtered mode, variables named by `environment.deny` are removed before sandboxed bash is spawned. Names are matched exactly; shell-style wildcards are not supported. Filtering copies the environment and does not mutate Pi's parent environment. Variables not denied, including `PATH`, `HOME`, `TMPDIR`, `TERM`, `LANG`, `LC_*`, and `SHELL`, remain available for normal developer commands. The `/seatbelt` status command reports the mode and denied-name count, never values.
+
+Environment inheritance is a separate security surface from filesystem and network access: a sandboxed process can read its own inherited environment even when Seatbelt blocks the corresponding secret files. Filtering is opt-in in this release, so `inherit` remains the default for compatibility.
 
 Global config is the trusted policy ceiling. Project-local `.pi/seatbelt.json` is a restriction-only layer; widening attempts are rejected and fail closed. Review project configuration as untrusted input even though it cannot weaken the global policy. Explicit user actions are required to widen or disable the sandbox.
 
