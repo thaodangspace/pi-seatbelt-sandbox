@@ -19,6 +19,21 @@
   lockfile update to the current matching SDK and patched transitive versions
   resolves those findings; `npm audit` must remain clean before publishing.
 
+The initial findings were dev/peer dependency findings, not dependencies
+shipped in the extension tarball. Their paths and remediations were:
+
+| Advisory package | Dependency path | Remediation |
+| --- | --- | --- |
+| `undici` | Pi SDK → `undici` | Pi SDK 0.84.1 → `undici` 8.9.0 |
+| `brace-expansion` | Pi SDK → `minimatch` → `brace-expansion` | 5.0.9 |
+| `nanoid` | Vitest → Vite → PostCSS → `nanoid` | 3.3.18 |
+| `postcss` | Vitest → Vite → `postcss` | 8.5.26 |
+| `protobufjs` | Pi SDK → Pi AI → Google GenAI → `protobufjs` | 7.6.5 |
+
+The extension's runtime code does not import these packages; the Pi SDK is
+loaded as a peer by the host. The CI audit remains intentionally blocking so a
+new high or critical finding cannot be merged silently.
+
 The peer range is intentionally `>=0.80.0 <1`: the extension currently uses
 Pi's stable extension/tool APIs from the 0.x SDK line, while a future Pi 1.x
 release may change those APIs. CI tests the latest matching SDK in the lockfile;
