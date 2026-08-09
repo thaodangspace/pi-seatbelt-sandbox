@@ -88,11 +88,13 @@ pi-seatbelt-sandbox/
     config.ts              # load + merge + variable expansion + validation
     seatbelt.ts            # .sb profile generator + temp-file lifecycle
     bash.ts                # createSeatbeltBashOperations()
+    sandbox-exec.ts        # trusted absolute Seatbelt launcher path
     policy.ts              # path canonicalization + allow/deny checks
     tool-guard.ts          # tool_call handler wiring policy to file tools
   test/
     seatbelt.test.ts
     policy.test.ts
+    bash.test.ts
     integration.sandbox.test.ts   # real sandbox-exec, gated on darwin
   README.md
 ```
@@ -329,7 +331,7 @@ export function createSeatbeltBashOperations(profilePath: string): BashOperation
       if (!existsSync(cwd)) throw new Error(`cwd does not exist: ${cwd}`);
 
       const child = spawn(
-        "sandbox-exec",
+        SANDBOX_EXEC_PATH,
         ["-f", profilePath, "/bin/bash", "-c", command],   // NOTE: -c, not -lc (§7.3)
         { cwd, env, detached: true, stdio: ["ignore", "pipe", "pipe"] },
       );
@@ -340,6 +342,16 @@ export function createSeatbeltBashOperations(profilePath: string): BashOperation
   };
 }
 ```
+
+`SANDBOX_EXEC_PATH` is the single trusted constant defined in
+`src/sandbox-exec.ts`:
+
+```ts
+export const SANDBOX_EXEC_PATH = "/usr/bin/sandbox-exec";
+```
+
+Both availability checks and process launches use this absolute path; `PATH` is
+never used to locate the Seatbelt launcher.
 
 ### 7.2 Wiring (fixes gating + user_bash gap)
 Follow the reference example's pattern — register a bash tool that falls back to
@@ -466,7 +478,8 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
     config = loadConfig(ctx.cwd);
     if (!config.enabled || pi.getFlag("no-seatbelt")) { active = false; notifyDisabled(); return; }
     if (process.platform !== "darwin") { active = false; failClosedOrWarn(); return; }
-    if (!which("sandbox-exec")) { active = false; failClosedOrWarn(); return; }
+    try { accessSync(SANDBOX_EXEC_PATH, constants.X_OK); }
+    catch { active = false; failClosedOrWarn(); return; }
     try {
       policy  = buildPolicy(config, ctx.cwd);
       profile = await createProfileFile(toProfileOptions(config));
@@ -549,8 +562,9 @@ Integration (darwin-gated, real `sandbox-exec`):
 5. `import "bsd.sb"` does not over-grant beyond `(deny default)` for a
    representative forbidden path.
 6. profile temp dir is `0700`, removed on `session_shutdown`.
-7. fail-closed: with `failClosed:true`, bash refuses when `sandbox-exec` is
-   absent (simulate via PATH) — never runs unsandboxed.
+7. fail-closed: with `failClosed:true`, bash refuses when
+   `/usr/bin/sandbox-exec` is unavailable or not executable — never runs
+   unsandboxed. A fake `sandbox-exec` earlier in `PATH` must never be invoked.
 8. `user_bash` path is sandboxed (not just the agent tool).
 
 Manual smoke: `pi -e ./index.ts`, run a benign build (`npm ci` under

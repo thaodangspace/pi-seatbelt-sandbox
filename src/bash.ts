@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
+import { SANDBOX_EXEC_PATH } from "./sandbox-exec.ts";
 
 export function createSeatbeltBashOperations(profilePath: string): BashOperations {
   return {
@@ -9,7 +10,7 @@ export function createSeatbeltBashOperations(profilePath: string): BashOperation
       if (!existsSync(cwd)) throw new Error(`cwd does not exist: ${cwd}`);
 
       return new Promise((resolve, reject) => {
-        const child = spawn("sandbox-exec", ["-f", profilePath, "/bin/bash", "-c", command], {
+        const child = spawn(SANDBOX_EXEC_PATH, ["-f", profilePath, "/bin/bash", "-c", command], {
           cwd,
           env,
           detached: true,

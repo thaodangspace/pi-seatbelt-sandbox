@@ -60,7 +60,7 @@ Project-local `.pi/seatbelt.json` can widen the sandbox for trusted projects; re
 
 The runtime is bound to the workspace cwd captured at session start. Config, policy, and the Seatbelt profile are built from that workspace. While Seatbelt is enabled, bash from a later cwd outside that workspace is refused instead of running with a mismatched policy. Start or reload a session from another workspace to use that workspace's policy.
 
-Layer A (`bash` and user `!`) is OS-enforced by macOS Seatbelt. Layer B (`read`/`write`/`edit`/`grep`/`find`/`ls`) is advisory and runs inside Pi's trusted Node process; it prevents the agent from asking built-in file tools for forbidden paths, but it is not an OS boundary.
+Layer A (`bash` and user `!`) is OS-enforced by macOS Seatbelt. The extension invokes the trusted `/usr/bin/sandbox-exec` directly, so `PATH` cannot shadow the Seatbelt launcher. Layer B (`read`/`write`/`edit`/`grep`/`find`/`ls`) is advisory and runs inside Pi's trusted Node process; it prevents the agent from asking built-in file tools for forbidden paths, but it is not an OS boundary.
 
 Pi extension code is unsandboxed and runs with full user privileges. This extension does not automatically sandbox arbitrary extension code, MCP tools, or custom tools unless they explicitly route execution through this extension's sandboxed bash operations and/or implement equivalent path checks.
 

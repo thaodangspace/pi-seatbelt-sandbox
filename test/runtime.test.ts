@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ProfileFile } from "../src/seatbelt.ts";
+import { SANDBOX_EXEC_PATH } from "../src/sandbox-exec.ts";
 
 const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
 const originalPath = process.env.PATH;
@@ -10,6 +11,7 @@ const tempDirs: string[] = [];
 
 afterEach(() => {
   vi.doUnmock("../src/seatbelt.ts");
+  vi.doUnmock("node:fs");
   vi.resetModules();
   if (originalPlatform) Object.defineProperty(process, "platform", originalPlatform);
   if (originalPath === undefined) delete process.env.PATH;
@@ -37,6 +39,16 @@ async function installRuntime(createProfileFile: () => Promise<ProfileFile>) {
   Object.defineProperty(process, "platform", { configurable: true, value: "darwin" });
   process.env.PATH = `${bin}${process.platform === "win32" ? ";" : ":"}${originalPath ?? ""}`;
 
+  vi.doMock("node:fs", async () => {
+    const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+    return {
+      ...actual,
+      accessSync(path: any, mode?: any) {
+        if (path === SANDBOX_EXEC_PATH) return;
+        return actual.accessSync(path, mode);
+      },
+    };
+  });
   vi.doMock("../src/seatbelt.ts", async () => {
     const actual = await vi.importActual<typeof import("../src/seatbelt.ts")>("../src/seatbelt.ts");
     return { ...actual, createProfileFile };

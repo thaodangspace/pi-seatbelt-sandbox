@@ -1,18 +1,19 @@
 import { execFileSync } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:http";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createSeatbeltBashOperations } from "../src/bash.ts";
-import { createProfileFile } from "../src/seatbelt.ts";
+import { SANDBOX_EXEC_PATH } from "../src/sandbox-exec.ts";
+import { createProfileFile, type ProfileFile } from "../src/seatbelt.ts";
 
 const sandboxUnavailableReason = (() => {
   if (process.platform !== "darwin") return `macOS Seatbelt required (platform: ${process.platform})`;
   try {
     execFileSync(
-      "/usr/bin/sandbox-exec",
+      SANDBOX_EXEC_PATH,
       ["-p", "(version 1) (allow default)", "/usr/bin/true"],
       { stdio: "ignore" },
     );
@@ -26,6 +27,34 @@ if (sandboxUnavailableReason) console.info(`Skipping Seatbelt integration: ${san
 const runIf = hasSandboxExec ? describe : describe.skip;
 
 runIf("sandbox-exec integration", () => {
+  it("does not resolve sandbox-exec through PATH", async () => {
+    const fakeBin = mkdtempSync(join(tmpdir(), "seatbelt-fake-bin-"));
+    const cwd = mkdtempSync(join(tmpdir(), "seatbelt-path-"));
+    const marker = join(fakeBin, "invoked");
+    const fakeSandboxExec = join(fakeBin, "sandbox-exec");
+    const originalPath = process.env.PATH;
+    writeFileSync(fakeSandboxExec, `#!/bin/sh\nprintf invoked > ${JSON.stringify(marker)}\nexit 99\n`);
+    chmodSync(fakeSandboxExec, 0o755);
+    // Deliberately make both the inherited and per-command PATH prefer the fake.
+    process.env.PATH = `${fakeBin}:${originalPath ?? ""}`;
+    let profile: ProfileFile | undefined;
+    try {
+      profile = await createProfileFile({ readable: [cwd, "/bin", "/usr"], writable: [cwd], denyRead: [], denyWrite: [], network: "none" });
+      const result = await createSeatbeltBashOperations(profile.path).exec("printf ok > path-check.txt", cwd, {
+        onData() {},
+        env: { ...process.env, PATH: `${fakeBin}:${originalPath ?? ""}` },
+      });
+      expect(result.exitCode).toBe(0);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      await profile?.dispose();
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      rmSync(fakeBin, { recursive: true, force: true });
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("allows workspace reads and blocks denied home secrets", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "seatbelt-int-"));
     writeFileSync(join(cwd, "ok.txt"), "ok");
