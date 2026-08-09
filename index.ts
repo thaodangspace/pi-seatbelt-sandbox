@@ -50,7 +50,9 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
       const route = bashRuntimeRoute(state, profile !== undefined);
       if (route === "local") return createBashTool(ctx.cwd).execute(id, params, signal, onUpdate);
       if (route === "sandboxed") {
-        const sandboxedBash = createBashTool(ctx.cwd, { operations: createSeatbeltBashOperations(profile!.path) });
+        const sandboxedBash = createBashTool(ctx.cwd, {
+          operations: createSeatbeltBashOperations(profile!.path, config.environment),
+        });
         return sandboxedBash.execute(id, params, signal, onUpdate);
       }
       return bashDisabledResult(failureReason ?? "sandbox profile unavailable");
@@ -63,7 +65,7 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
 
     const route = bashRuntimeRoute(state, profile !== undefined);
     if (route === "local") return;
-    if (route === "sandboxed") return { operations: createSeatbeltBashOperations(profile!.path) };
+    if (route === "sandboxed") return { operations: createSeatbeltBashOperations(profile!.path, config.environment) };
     return { result: bashRefusedCommandResult(failureReason ?? "sandbox profile unavailable") };
   });
 
@@ -245,6 +247,7 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
       "Seatbelt sandbox:",
       `  state: ${state}${failureReason ? ` (${failureReason})` : ""}`,
       `  network: ${config.network.mode}`,
+      `  environment: ${config.environment.mode}${config.environment.mode === "filtered" ? ` (${config.environment.deny.length} denied variables)` : ""}`,
       `  workspace: ${sessionRoot}`,
       `  cwd binding: bash is refused outside the session workspace while seatbelt is enabled`,
       `  profile: ${profile?.path ?? "(none)"}`,

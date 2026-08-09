@@ -1,9 +1,12 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
+import { buildSandboxEnvironment, type EnvironmentPolicy } from "./environment.ts";
 import { SANDBOX_EXEC_PATH } from "./sandbox-exec.ts";
 
-export function createSeatbeltBashOperations(profilePath: string): BashOperations {
+const INHERIT_ENVIRONMENT: EnvironmentPolicy = { mode: "inherit", deny: [] };
+
+export function createSeatbeltBashOperations(profilePath: string, environmentPolicy = INHERIT_ENVIRONMENT): BashOperations {
   return {
     async exec(command, cwd, { onData, signal, timeout, env }) {
       if (process.platform !== "darwin") throw new Error("pi-seatbelt-sandbox: macOS only");
@@ -12,7 +15,7 @@ export function createSeatbeltBashOperations(profilePath: string): BashOperation
       return new Promise((resolve, reject) => {
         const child = spawn(SANDBOX_EXEC_PATH, ["-f", profilePath, "/bin/bash", "-c", command], {
           cwd,
-          env,
+          env: buildSandboxEnvironment(env ?? process.env, environmentPolicy),
           detached: true,
           stdio: ["ignore", "pipe", "pipe"],
         });
