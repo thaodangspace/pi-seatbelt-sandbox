@@ -18,10 +18,12 @@ pi -e ./index.ts
 pi -e ./index.ts --no-seatbelt
 ```
 
-Config files are merged as defaults → global → project:
+Configuration is layered as defaults → trusted global policy → project restrictions:
 
 - `~/.pi/agent/extensions/seatbelt.json`
 - `<workspace>/.pi/seatbelt.json`
+
+The global configuration defines the maximum privileges for the session. Project-local configuration may only narrow that policy: it cannot disable an enabled sandbox or fail-closed behavior, widen network access, add readable/writable roots outside the global allowance, or remove global deny rules. Project deny rules are added to the global deny rules. Any attempted widening is an explicit configuration error and the session fails closed. Explicit user actions such as `--no-seatbelt` and `/seatbelt off` remain separate from repository-controlled configuration.
 
 Example:
 
@@ -56,7 +58,7 @@ Path semantics:
 
 ## Security model / known limitations
 
-Project-local `.pi/seatbelt.json` can widen the sandbox for trusted projects; review it like other trusted project configuration.
+Global config is the trusted policy ceiling. Project-local `.pi/seatbelt.json` is a restriction-only layer; widening attempts are rejected and fail closed. Review project configuration as untrusted input even though it cannot weaken the global policy. Explicit user actions are required to widen or disable the sandbox.
 
 The runtime is bound to the workspace cwd captured at session start. Config, policy, and the Seatbelt profile are built from that workspace. While Seatbelt is enabled, bash from a later cwd outside that workspace is refused instead of running with a mismatched policy. Start or reload a session from another workspace to use that workspace's policy.
 

@@ -23,6 +23,20 @@ function tempDir(prefix: string): string {
   return dir;
 }
 
+function setupConfig(globalConfig: Record<string, unknown>, projectConfig?: Record<string, unknown>): string {
+  const agentDir = tempDir("seatbelt-agent-");
+  const workspace = tempDir("seatbelt-workspace-");
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+
+  mkdirSync(join(agentDir, "extensions"), { recursive: true });
+  writeFileSync(join(agentDir, "extensions", "seatbelt.json"), JSON.stringify(globalConfig));
+  if (projectConfig !== undefined) {
+    mkdirSync(join(workspace, CONFIG_DIR_NAME), { recursive: true });
+    writeFileSync(join(workspace, CONFIG_DIR_NAME, "seatbelt.json"), JSON.stringify(projectConfig));
+  }
+  return workspace;
+}
+
 describe("config loading", () => {
   it("shallow-merges top-level config and nested network settings", () => {
     const merged = shallowMergeConfig(DEFAULT_CONFIG, {
@@ -38,30 +52,47 @@ describe("config loading", () => {
     expect(merged.writable).toBe(DEFAULT_CONFIG.writable);
   });
 
-  it("loads global config and lets project config override it", () => {
-    const agentDir = tempDir("seatbelt-agent-");
-    const workspace = tempDir("seatbelt-workspace-");
-    process.env.PI_CODING_AGENT_DIR = agentDir;
-
-    mkdirSync(join(agentDir, "extensions"), { recursive: true });
-    writeFileSync(
-      join(agentDir, "extensions", "seatbelt.json"),
-      JSON.stringify({ failClosed: false, readable: ["${WORKSPACE}/global-read"], writable: ["${WORKSPACE}/global-write"], network: { mode: "all" } }),
-    );
-
-    mkdirSync(join(workspace, CONFIG_DIR_NAME), { recursive: true });
-    writeFileSync(
-      join(workspace, CONFIG_DIR_NAME, "seatbelt.json"),
-      JSON.stringify({ readable: ["${WORKSPACE}/project-read"], network: { mode: "none" } }),
+  it("applies project config as a restriction-only layer", () => {
+    const workspace = setupConfig(
+      { failClosed: false, readable: ["${WORKSPACE}"], writable: ["${WORKSPACE}"], denyRead: ["${WORKSPACE}/global-secret"], denyWrite: ["${WORKSPACE}/global-protected"], network: { mode: "all" } },
+      { failClosed: true, readable: ["${WORKSPACE}/src"], writable: ["${WORKSPACE}/build"], denyRead: ["${WORKSPACE}/project-secret"], denyWrite: ["${WORKSPACE}/project-protected"], network: { mode: "none" } },
     );
 
     const loaded = loadConfig(workspace);
-
-    expect(loaded.failClosed).toBe(false);
-    expect(loaded.network.mode).toBe("none");
     const realWorkspace = realpathSync(workspace);
-    expect(loaded.readable).toEqual([join(realWorkspace, "project-read")]);
-    expect(loaded.writable).toEqual([join(realWorkspace, "global-write")]);
+
+    expect(loaded.failClosed).toBe(true);
+    expect(loaded.network.mode).toBe("none");
+    expect(loaded.readable).toEqual([join(realWorkspace, "src")]);
+    expect(loaded.writable).toEqual([join(realWorkspace, "build")]);
+    expect(loaded.denyRead).toEqual([join(realWorkspace, "global-secret"), join(realWorkspace, "project-secret")]);
+    expect(loaded.denyWrite).toEqual([join(realWorkspace, "global-protected"), join(realWorkspace, "project-protected")]);
+  });
+
+  it.each([
+    ["enabled", { enabled: true }, { enabled: false }, /cannot disable a globally enabled sandbox/],
+    ["failClosed", { failClosed: true }, { failClosed: false }, /cannot disable global fail-closed behavior/],
+    ["network none -> all", { network: { mode: "none" } }, { network: { mode: "all" } }, /widen network mode from none to all/],
+    ["network localhost -> all", { network: { mode: "localhost" } }, { network: { mode: "all" } }, /widen network mode from localhost to all/],
+  ] as const)("rejects project widening for %s", (_name, globalConfig, projectConfig, expected) => {
+    const workspace = setupConfig(globalConfig, projectConfig);
+    expect(() => loadConfig(workspace)).toThrow(expected);
+  });
+
+  it("allows stricter network mode and rejects filesystem widening", () => {
+    const workspace = setupConfig(
+      { readable: ["${WORKSPACE}/trusted"], writable: ["${WORKSPACE}/trusted"], network: { mode: "all" } },
+      { readable: ["${WORKSPACE}"], writable: ["${WORKSPACE}/outside"], network: { mode: "localhost" } },
+    );
+
+    expect(() => loadConfig(workspace)).toThrow(/outside the trusted global allowance/);
+
+    const validWorkspace = setupConfig(
+      { readable: ["${WORKSPACE}"], writable: ["${WORKSPACE}"], network: { mode: "all" } },
+      { readable: ["${WORKSPACE}/src"], writable: ["${WORKSPACE}/build"], network: { mode: "localhost" } },
+    );
+    const loaded = loadConfig(validWorkspace);
+    expect(loaded.network.mode).toBe("localhost");
   });
 
   it.each([

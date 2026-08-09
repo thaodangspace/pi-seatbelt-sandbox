@@ -144,11 +144,21 @@ const projectPath = join(ctx.cwd, CONFIG_DIR_NAME, "seatbelt.json");        // <
 const globalPath  = join(getAgentDir(), "extensions", "seatbelt.json");     // ~/.pi/agent/extensions/seatbelt.json
 ```
 
-Merge order (later wins): `DEFAULT_CONFIG` → global → project. Merge is shallow
-per top-level section (`readable`, `writable`, `denyRead`, `denyWrite`,
-`network`), matching the reference example's `deepMerge`. Parse failures are
-logged and treated as an empty override (do **not** silently fall back to
-unsandboxed; defaults still apply and `enabled` still governs).
+The effective policy is layered as `DEFAULT_CONFIG` → trusted global policy →
+project restrictions. The global policy is the maximum privilege ceiling. A
+project may narrow the policy, but may not silently weaken it:
+
+- `enabled: true` and `failClosed: true` cannot be changed to `false`;
+- network mode may only become stricter (`all` → `localhost` → `none`);
+- `readable` and `writable` entries must remain within the corresponding global
+  allowance (a project list replaces the global list with a subset);
+- project `denyRead` and `denyWrite` entries are unioned with global denies, so
+  global deny rules cannot be removed.
+
+Widening attempts are explicit configuration errors and fail closed. Explicit
+user actions, such as `--no-seatbelt` or `/seatbelt off`, are separate from
+repository-controlled configuration. Global config is merged shallowly over the
+defaults; project config is applied by the restriction rules above.
 
 Config is loaded in `session_start` using **`ctx.cwd`**, not at module init with
 `process.cwd()` (the workspace may differ from the process cwd).

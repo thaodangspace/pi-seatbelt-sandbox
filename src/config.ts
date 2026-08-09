@@ -1,6 +1,6 @@
 import { readFileSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { NetworkMode } from "./seatbelt.ts";
 
@@ -176,6 +176,133 @@ export function expandConfigPath(input: string, ctx: ExpansionContext): string {
   return isAbsolute(expanded) ? resolve(expanded) : resolve(workspace, expanded);
 }
 
+const NETWORK_STRICTNESS: Record<NetworkMode, number> = {
+  none: 0,
+  localhost: 1,
+  all: 2,
+};
+
+function containsGlob(path: string): boolean {
+  return /[*?]/.test(path);
+}
+
+function normalizeForRegex(path: string): string {
+  return path.split(sep).join("/");
+}
+
+function globToRegex(pattern: string): RegExp {
+  const normalized = normalizeForRegex(pattern);
+  let out = "^";
+  for (let i = 0; i < normalized.length; i++) {
+    const ch = normalized[i];
+    const next = normalized[i + 1];
+    if (ch === "*" && next === "*") {
+      const after = normalized[i + 2];
+      if (after === "/") {
+        out += "(?:.*/)?";
+        i += 2;
+      } else {
+        out += ".*";
+        i += 1;
+      }
+    } else if (ch === "*") {
+      out += "[^/]*";
+    } else if (ch === "?") {
+      out += "[^/]";
+    } else {
+      out += ch.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
+    }
+  }
+  out += "$";
+  return new RegExp(out);
+}
+
+function globPrefix(path: string, cwd: string): string {
+  const absolute = isAbsolute(path) ? resolve(path) : resolve(cwd, path);
+  const parts = absolute.split(sep);
+  const prefix: string[] = [];
+  for (const part of parts) {
+    if (part === "") {
+      prefix.push(part);
+      continue;
+    }
+    if (containsGlob(part)) break;
+    prefix.push(part);
+  }
+  return realpathOrResolve(prefix.length <= 1 ? sep : prefix.join(sep));
+}
+
+function isInsidePath(child: string, root: string): boolean {
+  const normalizedChild = child === sep ? sep : child.endsWith(sep) ? child.slice(0, -1) : child;
+  const normalizedRoot = root === sep ? sep : root.endsWith(sep) ? root.slice(0, -1) : root;
+  return normalizedRoot === sep
+    ? normalizedChild.startsWith(sep)
+    : normalizedChild === normalizedRoot || normalizedChild.startsWith(`${normalizedRoot}${sep}`);
+}
+
+function projectPathCovered(projectPath: string, basePath: string, cwd: string): boolean {
+  const projectGlob = containsGlob(projectPath);
+  const baseGlob = containsGlob(basePath);
+
+  // A glob-to-glob subset check is deliberately conservative. An exact match
+  // is safe; otherwise a project glob could hide a widening in the base glob.
+  if (baseGlob && projectGlob) return projectPath === basePath;
+  if (baseGlob) return globToRegex(basePath).test(normalizeForRegex(projectPath));
+  if (projectGlob) return isInsidePath(globPrefix(projectPath, cwd), realpathOrResolve(basePath));
+  return isInsidePath(realpathOrResolve(projectPath), realpathOrResolve(basePath));
+}
+
+function expandedRestrictionPaths(paths: string[], cwd: string, sourcePath: string, key: string): string[] {
+  try {
+    return paths.map((path) => expandConfigPath(path, { cwd }));
+  } catch (error) {
+    throw configError(sourcePath, `${key} contains an invalid path: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function assertProjectPathsDoNotWiden(base: SeatbeltConfig, override: ConfigOverride, cwd: string, sourcePath: string): void {
+  for (const key of ["readable", "writable"] as const) {
+    if (override[key] === undefined) continue;
+    const basePaths = expandedRestrictionPaths(base[key], cwd, sourcePath, key);
+    const projectPaths = expandedRestrictionPaths(override[key], cwd, sourcePath, key);
+    for (const projectPath of projectPaths) {
+      if (!basePaths.some((basePath) => projectPathCovered(projectPath, basePath, cwd))) {
+        throw configError(sourcePath, `project ${key} path ${projectPath} is outside the trusted global allowance`);
+      }
+    }
+  }
+}
+
+/** Apply a project config as a restriction-only layer over trusted config. */
+export function applyProjectRestrictions(
+  base: SeatbeltConfig,
+  override: ConfigOverride,
+  cwd: string,
+  sourcePath = "project configuration",
+): SeatbeltConfig {
+  if (base.enabled && override.enabled === false) {
+    throw configError(sourcePath, "project configuration cannot disable a globally enabled sandbox");
+  }
+  if (base.failClosed && override.failClosed === false) {
+    throw configError(sourcePath, "project configuration cannot disable global fail-closed behavior");
+  }
+  if (override.network && NETWORK_STRICTNESS[override.network.mode] > NETWORK_STRICTNESS[base.network.mode]) {
+    throw configError(sourcePath, `project seatbelt config attempted to widen network mode from ${base.network.mode} to ${override.network.mode}`);
+  }
+
+  assertProjectPathsDoNotWiden(base, override, cwd, sourcePath);
+  return {
+    ...base,
+    enabled: override.enabled ?? base.enabled,
+    failClosed: override.failClosed ?? base.failClosed,
+    readable: override.readable ?? base.readable,
+    writable: override.writable ?? base.writable,
+    denyRead: [...base.denyRead, ...(override.denyRead ?? [])],
+    denyWrite: [...base.denyWrite, ...(override.denyWrite ?? [])],
+    network: { mode: override.network?.mode ?? base.network.mode },
+  };
+}
+
 export function expandConfig(config: SeatbeltConfig, cwd: string): SeatbeltConfig {
   validateConfigShape(config);
   const expandList = (items: string[]) => items.map((item) => expandConfigPath(item, { cwd }));
@@ -193,6 +320,7 @@ export function loadConfig(cwd: string): SeatbeltConfig {
   const projectPath = join(cwd, CONFIG_DIR_NAME, "seatbelt.json");
   const globalPath = join(getAgentDir(), "extensions", "seatbelt.json");
 
-  const merged = shallowMergeConfig(shallowMergeConfig(DEFAULT_CONFIG, readOverride(globalPath)), readOverride(projectPath));
-  return expandConfig(merged, cwd);
+  const base = shallowMergeConfig(DEFAULT_CONFIG, readOverride(globalPath));
+  const effective = applyProjectRestrictions(base, readOverride(projectPath), cwd, projectPath);
+  return expandConfig(effective, cwd);
 }
