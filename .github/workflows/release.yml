@@ -110,7 +110,10 @@ jobs:
 
       - name: Nothing to publish
         if: steps.release.outputs.enabled != 'true'
-        run: echo "::notice::${steps.release.outputs.name}@${steps.release.outputs.version} is already published; skipping"
+        env:
+          NAME: ${{ steps.release.outputs.name }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: echo "::notice::${NAME}@${VERSION} is already published; skipping"
 
       - name: Install dependencies
         if: steps.release.outputs.enabled == 'true'
