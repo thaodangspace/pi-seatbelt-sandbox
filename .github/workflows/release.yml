@@ -143,6 +143,18 @@ jobs:
         if: steps.release.outputs.enabled == 'true'
         run: npm run test:package
 
+      - name: OIDC availability
+        if: steps.release.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          echo "node $(node -v), npm $(npm -v)"
+          if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
+            echo "id-token: available (id-token: write is in effect)"
+          else
+            echo "::error::id-token: NOT available, so npm cannot use trusted publishing; the job needs id-token: write"
+            exit 1
+          fi
+
       - name: Publish to npm
         if: steps.release.outputs.enabled == 'true'
         env:
@@ -179,10 +191,12 @@ jobs:
             exit 0
           fi
 
-          npm publish --provenance || {
-            echo "::error::publishing failed. Configure a trusted publisher for this repository on npmjs.com, or add the NPM_TOKEN secret, then re-run this job."
+          if ! npm publish --provenance; then
+            echo "--- npm debug log ---"
+            tail -n 40 "$HOME"/.npm/_logs/*debug-0.log || true
+            echo "::error::publishing failed. Configure a trusted publisher for this repository on npmjs.com (organization, repository, workflow filename and environment must match this job), or add the NPM_TOKEN secret, then re-run this job."
             exit 1
-          }
+          fi
 
       - name: Verify the published version
         if: steps.release.outputs.enabled == 'true' && steps.release.outputs.dry_run != 'true'
