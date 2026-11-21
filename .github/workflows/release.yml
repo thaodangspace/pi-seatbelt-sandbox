@@ -1,0 +1,227 @@
+name: Release
+
+# A merge into main publishes only when package.json carries a version that is
+# not on npm yet, so ordinary merges are no-ops. Bumping the version is the
+# release switch: merge the release PR and CI publishes.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Run every gate and a publish dry run, but do not publish
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-npm
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Publish to npm
+    if: github.repository == 'thaodangspace/pi-seatbelt-sandbox'
+    runs-on: macos-latest
+    timeout-minutes: 30
+    # Create this environment in repository settings and add required reviewers
+    # to keep a human approval between a merge and a publish.
+    environment: npm-publish
+    permissions:
+      contents: write # create the tag and the GitHub release
+      id-token: write # npm provenance, and trusted publishing when configured
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+
+      # npm 11.5+ is needed for OIDC trusted publishing; token auth works on it too.
+      - name: Upgrade npm
+        run: npm install --global npm@^11
+
+      - name: Resolve release
+        id: release
+        env:
+          REQUESTED_DRY_RUN: ${{ inputs.dry_run }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          tag="v${version}"
+
+          # A tag push must match package.json, otherwise the tag and the
+          # published artifact would disagree.
+          if [ "$REF_TYPE" = "tag" ] && [ "$REF_NAME" != "$tag" ]; then
+            echo "::error::tag ${REF_NAME} does not match package.json version ${version} (expected ${tag})"
+            exit 1
+          fi
+
+          # Releases are built from main. A tag on an unmerged branch is rejected.
+          if git rev-parse --verify --quiet origin/main >/dev/null; then
+            if ! git merge-base --is-ancestor HEAD origin/main; then
+              echo "::error::${REF_NAME} is not contained in origin/main; release from main"
+              exit 1
+            fi
+          fi
+
+          dry_run="${REQUESTED_DRY_RUN:-false}"
+          if [ "$dry_run" != "true" ]; then dry_run=false; fi
+
+          if npm view "${name}@${version}" version >/dev/null 2>&1; then
+            already_published=true
+          else
+            already_published=false
+          fi
+
+          if [ "$already_published" = "true" ] && [ "$dry_run" != "true" ]; then
+            enabled=false
+          else
+            enabled=true
+          fi
+
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "dry_run=${dry_run}" >> "$GITHUB_OUTPUT"
+          echo "already_published=${already_published}" >> "$GITHUB_OUTPUT"
+          echo "enabled=${enabled}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Release ${name}@${version}"
+            echo ""
+            echo "- trigger: \`${REF_TYPE}\` \`${REF_NAME}\`"
+            echo "- already on npm: \`${already_published}\`"
+            echo "- dry run: \`${dry_run}\`"
+            echo "- publish: \`${enabled}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Nothing to publish
+        if: steps.release.outputs.enabled != 'true'
+        run: echo "::notice::${steps.release.outputs.name}@${steps.release.outputs.version} is already published; skipping"
+
+      - name: Install dependencies
+        if: steps.release.outputs.enabled == 'true'
+        run: npm ci
+
+      - name: Typecheck
+        if: steps.release.outputs.enabled == 'true'
+        run: npm run typecheck
+
+      - name: Unit tests
+        if: steps.release.outputs.enabled == 'true'
+        run: npm run test:unit
+
+      - name: Dependency audit
+        if: steps.release.outputs.enabled == 'true'
+        run: npm audit --audit-level=high
+
+      - name: Verify package contents
+        if: steps.release.outputs.enabled == 'true'
+        run: npm pack --dry-run
+
+      - name: macOS sandbox integration tests
+        if: steps.release.outputs.enabled == 'true'
+        run: npm run test:integration
+
+      - name: Package smoke test
+        if: steps.release.outputs.enabled == 'true'
+        run: npm run test:package
+
+      - name: Publish to npm
+        if: steps.release.outputs.enabled == 'true'
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NAME: ${{ steps.release.outputs.name }}
+          VERSION: ${{ steps.release.outputs.version }}
+          DRY_RUN: ${{ steps.release.outputs.dry_run }}
+          ALREADY_PUBLISHED: ${{ steps.release.outputs.already_published }}
+        run: |
+          set -euo pipefail
+
+          # Token auth when the secret exists; otherwise npm 11 uses the OIDC
+          # trusted publisher configured for this package on npmjs.com.
+          if [ -n "${NPM_TOKEN:-}" ]; then
+            echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > "$HOME/.npmrc"
+            chmod 600 "$HOME/.npmrc"
+            echo "auth: NPM_TOKEN secret"
+          else
+            echo "auth: OIDC trusted publishing (no NPM_TOKEN secret)"
+          fi
+
+          if [ "$DRY_RUN" = "true" ]; then
+            # `npm publish --dry-run` still preflights against the registry, so it
+            # cannot run for a version that already exists, or without credentials.
+            if [ "$ALREADY_PUBLISHED" = "true" ]; then
+              echo "::notice::dry run: ${NAME}@${VERSION} is already on npm"
+            elif [ -n "${NPM_TOKEN:-}" ]; then
+              npm publish --dry-run
+            else
+              echo "::notice::dry run: no NPM_TOKEN, so the registry preflight is skipped"
+            fi
+            npm pack --dry-run > /dev/null
+            echo "::notice::dry run: ${NAME}@${VERSION} was not published"
+            exit 0
+          fi
+
+          npm publish --provenance || {
+            echo "::error::publishing failed. Configure a trusted publisher for this repository on npmjs.com, or add the NPM_TOKEN secret, then re-run this job."
+            exit 1
+          }
+
+      - name: Verify the published version
+        if: steps.release.outputs.enabled == 'true' && steps.release.outputs.dry_run != 'true'
+        env:
+          NAME: ${{ steps.release.outputs.name }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5 6; do
+            published=$(npm view "${NAME}@${VERSION}" version 2>/dev/null || true)
+            if [ "$published" = "$VERSION" ]; then
+              echo "::notice::${NAME}@${VERSION} is live on npm"
+              echo "- published: \`${NAME}@${VERSION}\`" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::${NAME}@${VERSION} is not readable from npm after publishing"
+          exit 1
+
+      - name: Create tag and GitHub release
+        if: steps.release.outputs.enabled == 'true' && steps.release.outputs.dry_run != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          npm pack --pack-destination dist
+          tarball=$(ls dist/*.tgz)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::notice::release ${TAG} already exists; uploading the tarball"
+            gh release upload "$TAG" "$tarball" --clobber
+          else
+            gh release create "$TAG" "$tarball" \
+              --target "$GITHUB_SHA" \
+              --title "$TAG" \
+              --generate-notes
+          fi
+          echo "- release: ${TAG}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Warn when the tag and the release disagree
+        if: steps.release.outputs.enabled != 'true' && github.ref_type == 'tag'
+        run: echo "::warning::tag ${{ github.ref_name }} already matches a published version"
