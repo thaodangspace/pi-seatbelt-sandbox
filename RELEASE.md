@@ -102,7 +102,22 @@ required reviewers. The job then waits for a human approval between the merge
 and the publish, while everything else stays automatic. Keep `main` protected so
 a version bump always travels through a pull request and a green CI run.
 
-### Manual fallback
+#### Verifying a published release
+
+```bash
+npm view pi-seatbelt-sandbox@X.Y.Z dist.integrity dist.shasum dist.attestations
+```
+
+- `npm audit signatures` in a project that installed the package verifies the
+  provenance attestation npm stores for the published tarball.
+- The tarball attached to the GitHub release is the published artifact, not a
+  repack: the workflow checks its `sha512` against `dist.integrity` before
+  creating the release, so it is byte-identical to what npm serves.
+- `gh attestation verify` does not apply here. npm keeps the provenance
+  attestation in its own registry, so there is no GitHub attestation for the
+  asset; use `npm audit signatures` or compare the integrity hash.
+
+## Manual fallback
 
 Do not publish by hand unless the workflow is broken. The manual path is:
 
