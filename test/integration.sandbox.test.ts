@@ -26,7 +26,56 @@ const hasSandboxExec = sandboxUnavailableReason === undefined;
 if (sandboxUnavailableReason) console.info(`Skipping Seatbelt integration: ${sandboxUnavailableReason}`);
 const runIf = hasSandboxExec ? describe : describe.skip;
 
+// Python's multiprocessing.SemLock is the capability under test; skip when no
+// interpreter is available so the suite stays usable on hosts without one.
+const pythonWithMultiprocessing = [
+  "/usr/bin/python3",
+  "/opt/homebrew/bin/python3",
+  "/usr/local/bin/python3",
+].find((candidate) => existsSync(candidate));
+const runIfPython = pythonWithMultiprocessing ? it : it.skip;
+const pythonReadableRoots = [
+  "/opt/homebrew",
+  "/usr/local",
+  "/Applications/Xcode.app",
+  "/Applications/Xcode-beta.app",
+  "/Library/Developer/CommandLineTools",
+];
+
 runIf("sandbox-exec integration", () => {
+  runIfPython("allows POSIX semaphores for Python multiprocessing", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "seatbelt-ipc-sem-"));
+    const readable = [cwd, "/bin", "/usr", "/System", "/Library", "/etc", "/private/etc", "/dev/null", "/dev/urandom", ...pythonReadableRoots];
+    const profile = await createProfileFile({ readable, writable: [cwd, tmpdir()], denyRead: [], denyWrite: [], network: "none" });
+    try {
+      const ops = createSeatbeltBashOperations(profile.path);
+      const env = { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" };
+      const python = JSON.stringify(pythonWithMultiprocessing);
+
+      const lockOutput: Buffer[] = [];
+      const lock = await ops.exec(
+        `${python} -c 'import multiprocessing; multiprocessing.Lock(); print("semaphore-ok")'`,
+        cwd,
+        { onData: (chunk) => lockOutput.push(Buffer.from(chunk)), env },
+      );
+      expect(lock.exitCode).toBe(0);
+      expect(Buffer.concat(lockOutput).toString()).toContain("semaphore-ok");
+
+      // ProcessPoolExecutor also queries SC_SEM_NSEMS_MAX and creates its own locks.
+      const poolOutput: Buffer[] = [];
+      const pool = await ops.exec(
+        `${python} -c 'from concurrent.futures import ProcessPoolExecutor; print("pool-ok", ProcessPoolExecutor(max_workers=1).submit(abs, -3).result())'`,
+        cwd,
+        { onData: (chunk) => poolOutput.push(Buffer.from(chunk)), env },
+      );
+      expect(pool.exitCode).toBe(0);
+      expect(Buffer.concat(poolOutput).toString()).toContain("pool-ok 3");
+    } finally {
+      await profile.dispose();
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("does not resolve sandbox-exec through PATH", async () => {
     const fakeBin = mkdtempSync(join(tmpdir(), "seatbelt-fake-bin-"));
     const cwd = mkdtempSync(join(tmpdir(), "seatbelt-path-"));

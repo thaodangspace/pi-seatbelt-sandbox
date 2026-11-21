@@ -303,6 +303,12 @@ export function createProfileFile(o: SeatbeltProfileOptions): Promise<{
 (allow process-info* (target self))
 ;; Do not grant blanket sysctl-read: KERN_PROCARGS2 can expose process env.
 
+;; POSIX semaphores: kernel IPC, neither filesystem nor network access. Python's
+;; multiprocessing.SemLock calls sem_open(), so (deny default) turns
+;; multiprocessing.Lock() and ProcessPoolExecutor into EPERM. Shared memory
+;; (ipc-posix-shm) and System V semaphores (ipc-sysv-sem) stay denied.
+(allow ipc-posix-sem)
+
 ;; Explicit filesystem policy (subpath = prefix match on canonical paths).
 (allow file-read*  <readable subpaths...>)
 (allow file-write* <writable subpaths...>)
@@ -331,6 +337,13 @@ Correctness requirements (all covered by tests in §11):
   generator, consistent with the policy layer (§8).
 - Empty rule lists emit **nothing** (never an empty `(allow file-read*)`, which
   is a syntax error).
+- IPC stays narrow: only `(allow ipc-posix-sem)` is granted. `ipc-posix-shm`
+  (Python `shared_memory`, OpenMP runtime registration) and `ipc-sysv-sem`
+  (lmdb, Angular persistent cache) remain denied by `(deny default)`; widen them
+  only with an integration test proving the specific workload, and note that on
+  macOS `sem_open()` needs `ipc-posix-sem` while `ProcessPoolExecutor` additionally
+  reads `kern.sysv.semmns`. That sysctl is already readable here because
+  `bsd.sb` pulls in `system.sb`'s blanket `(allow sysctl-read)`.
 
 ### 6.4 Network (the fragile part — needs validation, not assumption)
 The original's `(remote ip "localhost:*")` / `"127.0.0.1:*"` / `"::1:*"` is **not

@@ -37,6 +37,16 @@ describe("renderSeatbeltProfile", () => {
     expect(text).not.toContain("sysctl-read");
   });
 
+  it("allows POSIX semaphores for Python multiprocessing without widening other IPC", () => {
+    const text = renderSeatbeltProfile({ readable: ["/tmp"], writable: [], denyRead: [], denyWrite: [], network: "none" });
+
+    expect(text).toContain("(allow ipc-posix-sem)");
+    // Semaphores are the only IPC family Python's SemLock needs; shared memory
+    // and System V semaphores stay behind (deny default) pending their own fixes.
+    expect(text).not.toContain("ipc-posix-shm");
+    expect(text).not.toContain("ipc-sysv-sem");
+  });
+
   it("quotes paths and omits empty list rules", () => {
     const text = renderSeatbeltProfile({ readable: ["/tmp/path with spaces/quote\"x"], writable: [], denyRead: [], denyWrite: [], network: "all" });
     expect(text).toContain("path with spaces/quote\\\"x");
