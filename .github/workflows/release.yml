@@ -239,8 +239,17 @@ jobs:
             exit 0
           fi
           mkdir -p dist
-          npm pack --pack-destination dist
+          # Attach the tarball npm actually published, not a fresh repack, so the
+          # release asset provably matches the registry.
+          npm pack "${NAME}@${VERSION}" --pack-destination dist > /dev/null
           tarball=$(ls dist/*.tgz)
+          expected=$(npm view "${NAME}@${VERSION}" dist.integrity --prefer-online)
+          actual="sha512-$(openssl dgst -sha512 -binary "$tarball" | openssl base64 -A)"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::the attached tarball does not match the published integrity"
+            exit 1
+          fi
+          echo "- tarball integrity: \`${expected}\`" >> "$GITHUB_STEP_SUMMARY"
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "::notice::release ${TAG} already exists; uploading the tarball"
             gh release upload "$TAG" "$tarball" --clobber
