@@ -93,4 +93,7 @@ npm run test:integration  # macOS + sandbox-exec only
 npm pack --dry-run
 ```
 
-See `RELEASE.md` for the publish checklist.
+See `RELEASE.md` for the publish checklist. Publishing is automated: the
+`Release` workflow publishes to npm when `package.json` on `main` carries a
+version that is not on the registry yet, so a `release: vX.Y.Z` pull request is
+the release switch. Run the workflow manually with `dry_run` to rehearse it.

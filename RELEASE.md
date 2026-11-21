@@ -58,6 +58,54 @@ dev dependency can track Pi 1.x; the lower bound is unchanged, so existing Pi
 0.x hosts stay supported. CI tests the latest matching SDK in the lockfile;
 changes to the peer range require a compatibility review and test update.
 
+## Publishing a release
+
+The `Release` workflow (`.github/workflows/release.yml`) publishes to npm. The
+version in `package.json` is the release switch:
+
+1. Open a `release: vX.Y.Z` pull request that bumps `version` in `package.json`
+   (keep `package-lock.json` in sync with `npm install --package-lock-only`)
+   and lists what changed. This is the only step a maintainer has to write by
+   hand, and it is reviewable like any other change.
+2. Merge it into `main`. The workflow then:
+   - reads `name`/`version` from `package.json` and stops unless that exact
+     version is missing from npm, so ordinary merges publish nothing;
+   - rejects a tag/version mismatch and a commit that is not on `main`;
+   - runs the release gates on a macOS runner: `typecheck`, unit tests,
+     `npm audit --audit-level=high`, `npm pack --dry-run`, the sandbox
+     integration tests, and the tarball smoke test;
+   - publishes with `npm publish --provenance`;
+   - verifies the new version is readable from the registry, then creates the
+     `vX.Y.Z` tag and a GitHub release with generated notes and the tarball.
+
+Pushing a `vX.Y.Z` tag also triggers the workflow, which is the recovery path
+when the automatic run failed after publishing; the version guard makes it a
+no-op once the version is live. `workflow_dispatch` runs every gate plus a
+publish dry run without publishing, which is how to rehearse the pipeline.
+
+### One-time setup
+
+The workflow needs credentials; pick one and configure it before the first
+release:
+
+- **npm trusted publishing (preferred, no long-lived secret).** On
+  <https://www.npmjs.com/package/pi-seatbelt-sandbox/access>, add a trusted
+  publisher: repository `thaodangspace/pi-seatbelt-sandbox`, workflow
+  `release.yml`, environment `npm-publish`. The workflow already requests
+  `id-token: write` and upgrades npm, which is what OIDC publishing needs.
+- **Repository secret `NPM_TOKEN`.** A granular npm access token with read and
+  write access to the package, stored as an environment or repository secret.
+  When the secret is present the workflow uses it instead of OIDC.
+
+Also create the `npm-publish` environment in repository settings and add
+required reviewers. The job then waits for a human approval between the merge
+and the publish, while everything else stays automatic. Keep `main` protected so
+a version bump always travels through a pull request and a green CI run.
+
+### Manual fallback
+
+Do not publish by hand unless the workflow is broken. The manual path is:
+
 1. Update `package.json` version and keep `package-lock.json` in sync.
 2. Run local checks:
    ```bash
