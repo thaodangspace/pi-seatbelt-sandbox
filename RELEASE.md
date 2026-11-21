@@ -34,9 +34,28 @@ The extension's runtime code does not import these packages; the Pi SDK is
 loaded as a peer by the host. The CI audit remains intentionally blocking so a
 new high or critical finding cannot be merged silently.
 
-The peer range is intentionally `>=0.80.0 <1`: the extension currently uses
-Pi's stable extension/tool APIs from the 0.x SDK line, while a future Pi 1.x
-release may change those APIs. CI tests the latest matching SDK in the lockfile;
+A later audit drift reported ten findings, four of them high, through packages
+nested in the Pi SDK plus the Vitest/Vite toolchain:
+
+| Advisory package | Dependency path | Remediation |
+| --- | --- | --- |
+| `undici` | Pi SDK → `undici` | Pi SDK 1.6.0 → `undici` 8.12.4 |
+| `minimatch` | Pi SDK → `minimatch` | Pi SDK 1.6.0 → `minimatch` 11.0.3 |
+| `brace-expansion` | Pi SDK → `brace-expansion` | Pi SDK 1.6.0 → `brace-expansion` 5.0.12 |
+| `fast-xml-parser` | Pi SDK → Pi AI → AWS SDK → `fast-xml-parser` | Pi SDK 1.6.0 → patched line |
+| `source-map-js` | Vitest → Vite → `source-map-js` | 1.2.4 |
+| `vite`, `@vitest/mocker` | Vitest → `vite` | Vitest 4.1.12 → `vite` 8.3.8 |
+
+`@earendil-works/pi-coding-agent` resolves to exactly the patched transitive
+versions, so `npm audit fix` on the remaining toolchain packages (Vitest, Vite,
+`source-map-js`) is enough to keep the audit clean again.
+
+The peer range is `>=0.80.0 <2`: the extension uses Pi's stable extension/tool
+APIs (`ExtensionAPI`, `ExtensionContext`, `ExtensionCommandContext`,
+`createBashTool`, `BashOperations`, `CONFIG_DIR_NAME`, `getAgentDir`), which the
+1.x SDK line kept. The upper bound was widened from `<1` to `<2` so the audited
+dev dependency can track Pi 1.x; the lower bound is unchanged, so existing Pi
+0.x hosts stay supported. CI tests the latest matching SDK in the lockfile;
 changes to the peer range require a compatibility review and test update.
 
 1. Update `package.json` version and keep `package-lock.json` in sync.
