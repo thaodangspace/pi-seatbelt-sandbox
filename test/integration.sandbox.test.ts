@@ -52,29 +52,26 @@ runIf("sandbox-exec integration", () => {
       const env = { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" };
       const python = JSON.stringify(pythonWithMultiprocessing);
 
-      const lockOutput: Buffer[] = [];
-      const lock = await ops.exec(
-        `${python} -c 'import multiprocessing; multiprocessing.Lock(); print("semaphore-ok")'`,
+      // One interpreter: spawning CPython twice costs seconds on CI runners, and
+      // this test already runs a real Python process inside the sandbox.
+      // ProcessPoolExecutor also creates SemLocks and queries SC_SEM_NSEMS_MAX.
+      const output: Buffer[] = [];
+      const result = await ops.exec(
+        `${python} -c 'import multiprocessing; multiprocessing.Lock(); print("semaphore-ok"); from concurrent.futures import ProcessPoolExecutor; print("pool-ok", ProcessPoolExecutor(max_workers=1).submit(abs, -3).result())'`,
         cwd,
-        { onData: (chunk) => lockOutput.push(Buffer.from(chunk)), env },
+        { onData: (chunk) => output.push(Buffer.from(chunk)), env },
       );
-      expect(lock.exitCode).toBe(0);
-      expect(Buffer.concat(lockOutput).toString()).toContain("semaphore-ok");
-
-      // ProcessPoolExecutor also queries SC_SEM_NSEMS_MAX and creates its own locks.
-      const poolOutput: Buffer[] = [];
-      const pool = await ops.exec(
-        `${python} -c 'from concurrent.futures import ProcessPoolExecutor; print("pool-ok", ProcessPoolExecutor(max_workers=1).submit(abs, -3).result())'`,
-        cwd,
-        { onData: (chunk) => poolOutput.push(Buffer.from(chunk)), env },
-      );
-      expect(pool.exitCode).toBe(0);
-      expect(Buffer.concat(poolOutput).toString()).toContain("pool-ok 3");
+      const text = Buffer.concat(output).toString();
+      expect(result.exitCode).toBe(0);
+      expect(text).toContain("semaphore-ok");
+      expect(text).toContain("pool-ok 3");
     } finally {
       await profile.dispose();
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+    // CPython start-up plus a forked worker on a shared CI runner needs more than
+    // the default 5s budget; the assertion, not the clock, should decide failure.
+  }, 30_000);
 
   it("does not resolve sandbox-exec through PATH", async () => {
     const fakeBin = mkdtempSync(join(tmpdir(), "seatbelt-fake-bin-"));
