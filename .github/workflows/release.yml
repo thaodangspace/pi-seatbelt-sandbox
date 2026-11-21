@@ -80,7 +80,9 @@ jobs:
           dry_run="${REQUESTED_DRY_RUN:-false}"
           if [ "$dry_run" != "true" ]; then dry_run=false; fi
 
-          if npm view "${name}@${version}" version >/dev/null 2>&1; then
+          # --prefer-online: a cached packument would make this guard wrong in
+          # both directions, so always revalidate against the registry.
+          if npm view "${name}@${version}" version --prefer-online >/dev/null 2>&1; then
             already_published=true
           else
             already_published=false
@@ -205,26 +207,37 @@ jobs:
           VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
-          for attempt in 1 2 3 4 5 6; do
-            published=$(npm view "${NAME}@${VERSION}" version 2>/dev/null || true)
+          # Registry propagation can lag, and --prefer-online keeps npm from
+          # answering from the packument cached earlier in this job.
+          for attempt in $(seq 1 12); do
+            published=$(npm view "${NAME}@${VERSION}" version --prefer-online 2>/dev/null || true)
             if [ "$published" = "$VERSION" ]; then
-              echo "::notice::${NAME}@${VERSION} is live on npm"
+              echo "::notice::${NAME}@${VERSION} is live on npm (attempt ${attempt})"
               echo "- published: \`${NAME}@${VERSION}\`" >> "$GITHUB_STEP_SUMMARY"
               exit 0
             fi
-            sleep 10
+            sleep 15
           done
           echo "::error::${NAME}@${VERSION} is not readable from npm after publishing"
           exit 1
 
       - name: Create tag and GitHub release
-        if: steps.release.outputs.enabled == 'true' && steps.release.outputs.dry_run != 'true'
+        # always(): a publish that succeeded while the registry read lagged must
+        # still get its tag, and a re-run over an already-published version
+        # repairs a missing release instead of skipping it.
+        if: always() && steps.release.outputs.dry_run != 'true' && steps.release.outputs.name != ''
         env:
           GH_TOKEN: ${{ github.token }}
+          NAME: ${{ steps.release.outputs.name }}
           TAG: ${{ steps.release.outputs.tag }}
           VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
+          published=$(npm view "${NAME}@${VERSION}" version --prefer-online 2>/dev/null || true)
+          if [ "$published" != "$VERSION" ]; then
+            echo "::notice::${NAME}@${VERSION} is not on npm; nothing to release"
+            exit 0
+          fi
           mkdir -p dist
           npm pack --pack-destination dist
           tarball=$(ls dist/*.tgz)
@@ -232,8 +245,9 @@ jobs:
             echo "::notice::release ${TAG} already exists; uploading the tarball"
             gh release upload "$TAG" "$tarball" --clobber
           else
+            target=$(git log -S"\"version\": \"${VERSION}\"" --format=%H -- package.json | tail -n 1)
             gh release create "$TAG" "$tarball" \
-              --target "$GITHUB_SHA" \
+              --target "${target:-$GITHUB_SHA}" \
               --title "$TAG" \
               --generate-notes
           fi
