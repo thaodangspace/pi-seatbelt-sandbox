@@ -45,6 +45,8 @@ Example:
 
 Variables supported in path lists: `${WORKSPACE}`, `${HOME}`, `${TMPDIR}`. Unknown variables are config errors. Existing configuration files are validated before merging: unreadable files, invalid JSON, unknown keys, invalid nested objects, and unsupported values are configuration errors that put the session into fail-closed mode; the UI reports the source filename.
 
+Tool parameter schemas use `typebox` (`import { Type } from "typebox"`); Pi pins `typebox@1.3.27` and does not re-export `Type` from its own entry point, so this package declares it as a direct dependency.
+
 Path semantics:
 
 - Non-glob paths are treated as subpath roots.
@@ -54,11 +56,49 @@ Path semantics:
 
 ## Commands
 
-- `/seatbelt` — show current session state and policy
+- `/seatbelt` — show current session state and policy (the status line appends ` +N grants` while grants apply)
 - `/seatbelt network none|localhost|all` — change network mode for this session
 - `/seatbelt allow-read <path>` — add a session-only readable root
 - `/seatbelt allow-write <path>` — add a session-only writable root
+- `/seatbelt grants` — list persisted grants for this project, plus session-only grants marked `(session)`
+- `/seatbelt revoke <id>` — revoke one persisted grant, then re-apply the policy
+- `/seatbelt revoke all` — revoke every persisted grant for this project
+- `/seatbelt grants reset` — delete this project's grant file after a confirmation prompt
 - `/seatbelt off` — disable for this session (`failClosed:true` refuses bash)
+
+## Access requests and per-project grants
+
+The agent can ask for extra access instead of stopping at a policy block. It calls the `seatbelt_request_access` tool with:
+
+- `kind`: `read`, `write`, or `network`.
+- `path`: required for `read` and `write` and rejected for `network`. It must be an absolute path that exists; globs are refused.
+- `mode`: `localhost` or `all`, required for `network` and rejected for the other kinds.
+- `reason`: 1 to 500 characters, shown to the user quoted and sanitized.
+
+The user decides in the terminal: `Allow for this session`, `Allow and remember for this project`, or `Deny`. Dismissing the dialog counts as a deny. A deny is final for that target for the session: the agent is not prompted again for it and gets the deny result immediately, and at most 5 request dialogs are shown per session. A `write` grant includes read access to the same subtree. `Allow and remember for this project` writes the grant to the per-project store, so a later session in the same project starts with it. The tool does not prompt when there is no interactive UI (print or JSON mode) or when the sandbox is not active; it returns a result that names the equivalent user command (`/seatbelt allow-read`, `/seatbelt allow-write`, or `/seatbelt network`).
+
+Grant file: `<agentDir>/extensions/seatbelt-grants/<sha256 of the canonical project root>.json`, where `<agentDir>` is `~/.pi/agent` unless `PI_CODING_AGENT_DIR` overrides it. The directory is created with mode `0700` and the file with mode `0600`; a write goes to a temporary file in the same directory and is then renamed into place. Network grants expire 7 days after they are created and path grants do not expire; expired grants are pruned when the store is loaded and again before every write.
+
+### Composition order
+
+The effective policy is composed in this order:
+
+1. Built-in defaults.
+2. The trusted global configuration file, which is the ceiling for repository content.
+3. Persisted grants for this project. These are explicit user approvals, so they may widen beyond the global allowance.
+4. The project `.pi/seatbelt.json` file, which stays restriction-only against the global allowance: its `readable` and `writable` lists replace the granted lists for this project, and its deny lists are added to the earlier ones.
+5. Session-only changes: `/seatbelt allow-read`, `/seatbelt allow-write`, and `/seatbelt network`.
+6. The grant-store deny paths.
+
+Deny rules always win over grants: no grant can re-allow a `denyRead` or `denyWrite` path. While grants apply, the status line carries the count, for example `🔒 seatbelt: net=localhost +2 grants`.
+
+### Grant store protection
+
+The grant store directory is added to both `denyRead` and `denyWrite` before the policy and the Seatbelt profile are built, so neither sandboxed bash nor the built-in file tools can read, create, or replace a grant file. A store that is corrupt, carries an unknown version, or belongs to another project applies no grants and is never rewritten; a store directory that ends up inside the workspace is ignored with one warning. `/seatbelt grants reset` deletes this project's store file after a confirmation prompt and is the recovery path for a store the extension will not write.
+
+### Threat model
+
+Consent comes only from the terminal dialog: no tool parameter, environment variable, or configuration key can grant access, so a compromised agent cannot grant itself access. A path grant is refused for globs, `/`, `$HOME`, the agent directory and its own configuration and trust files, the grant store, the project `.pi` directory, and any deny-listed path. The only controls on a remembered grant are `/seatbelt revoke <id>`, `/seatbelt revoke all`, `/seatbelt grants reset`, and the 7-day network expiry.
 
 ## Security model / known limitations
 

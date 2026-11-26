@@ -4,6 +4,7 @@ import { isAbsolute, join, resolve, sep } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { canon } from "./policy.ts";
 import type { EnvironmentMode } from "./environment.ts";
+import { applyGrants, type Grant } from "./grants.ts";
 import type { NetworkMode } from "./seatbelt.ts";
 
 export interface SeatbeltConfig {
@@ -56,7 +57,7 @@ export class ConfigError extends Error {
   }
 }
 
-type ConfigOverride = Omit<Partial<SeatbeltConfig>, "environment" | "network"> & {
+export type ConfigOverride = Omit<Partial<SeatbeltConfig>, "environment" | "network"> & {
   environment?: Partial<SeatbeltConfig["environment"]>;
   network?: Partial<SeatbeltConfig["network"]>;
 };
@@ -280,12 +281,18 @@ function assertProjectPathsDoNotWiden(base: SeatbeltConfig, override: ConfigOver
   }
 }
 
-/** Apply a project config as a restriction-only layer over trusted config. */
+/**
+ * Apply a project config as a restriction-only layer over trusted config.
+ * `ceiling` is the trusted configuration that project paths must not widen; it
+ * defaults to `base` but callers that widen `base` beforehand (grants) must
+ * pass the pre-widening configuration.
+ */
 export function applyProjectRestrictions(
   base: SeatbeltConfig,
   override: ConfigOverride,
   cwd: string,
   sourcePath = "project configuration",
+  ceiling: SeatbeltConfig = base,
 ): SeatbeltConfig {
   if (base.enabled && override.enabled === false) {
     throw configError(sourcePath, "project configuration cannot disable a globally enabled sandbox");
@@ -300,7 +307,7 @@ export function applyProjectRestrictions(
     throw configError(sourcePath, `project seatbelt config attempted to widen network mode from ${base.network.mode} to ${override.network.mode}`);
   }
 
-  assertProjectPathsDoNotWiden(base, override, cwd, sourcePath);
+  assertProjectPathsDoNotWiden(ceiling, override, cwd, sourcePath);
   return {
     ...base,
     enabled: override.enabled ?? base.enabled,
@@ -330,11 +337,34 @@ export function expandConfig(config: SeatbeltConfig, cwd: string): SeatbeltConfi
   };
 }
 
+/** Trusted base configuration: defaults plus the global config file, expanded. */
+export function loadBaseConfig(cwd: string): SeatbeltConfig {
+  const globalPath = join(getAgentDir(), "extensions", "seatbelt.json");
+  return expandConfig(shallowMergeConfig(DEFAULT_CONFIG, readOverride(globalPath)), cwd);
+}
+
+/** Raw project override, before any restriction checks. */
+export function loadProjectOverride(cwd: string): ConfigOverride {
+  return readOverride(join(cwd, CONFIG_DIR_NAME, "seatbelt.json"));
+}
+
+/**
+ * Compose the effective configuration in FR7 order: base, grants, project
+ * restrictions (with the pre-grant base as the widening ceiling), expansion.
+ */
+export function composeConfig(
+  base: SeatbeltConfig,
+  project: ConfigOverride,
+  grants: Grant[],
+  cwd: string,
+  sourcePath?: string,
+): SeatbeltConfig {
+  const granted = applyGrants(base, grants, cwd);
+  const restricted = applyProjectRestrictions(granted, project, cwd, sourcePath, base);
+  return expandConfig(restricted, cwd);
+}
+
 export function loadConfig(cwd: string): SeatbeltConfig {
   const projectPath = join(cwd, CONFIG_DIR_NAME, "seatbelt.json");
-  const globalPath = join(getAgentDir(), "extensions", "seatbelt.json");
-
-  const base = shallowMergeConfig(DEFAULT_CONFIG, readOverride(globalPath));
-  const effective = applyProjectRestrictions(base, readOverride(projectPath), cwd, projectPath);
-  return expandConfig(effective, cwd);
+  return expandConfig(applyProjectRestrictions(loadBaseConfig(cwd), loadProjectOverride(cwd), cwd, projectPath), cwd);
 }

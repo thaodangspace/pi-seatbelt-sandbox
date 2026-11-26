@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -58,6 +58,33 @@ describe("tool guard", () => {
     expect(guard({ toolName: "write", input: { path: join(root, "ok.txt") } })).toBeUndefined();
     expect(guard({ toolName: "read", input: { path: join(root, "secret", "x") } })).toMatchObject({ block: true, reason: expect.stringMatching(/denied/) });
     expect(guard({ toolName: "write", input: { path: join(root, ".env") } })).toMatchObject({ block: true, reason: expect.stringMatching(/denied/) });
+  });
+
+  it("names the request tool only in the outside-roots block reason", () => {
+    const root = mkdtempSync(join(tmpdir(), "seatbelt-guard-"));
+    const outside = mkdtempSync(join(tmpdir(), "seatbelt-guard-outside-"));
+    const policy = buildPolicy({ readable: [root], writable: [root], denyRead: [join(root, "secret")], denyWrite: [] }, root);
+    const guard = captureGuard({ isActive: () => true, getPolicy: () => policy });
+
+    const outsideReason = (guard({ toolName: "read", input: { path: join(outside, "x.txt") } }) as { reason: string }).reason;
+    // The canonical path is kept and the hint names the tool the agent must call.
+    expect(outsideReason).toContain(join(realpathSync(outside), "x.txt"));
+    expect(outsideReason).toMatch(/outside allowed roots/);
+    expect(outsideReason).toMatch(/seatbelt_request_access/);
+
+    const deniedReason = (guard({ toolName: "read", input: { path: join(root, "secret", "x.txt") } }) as { reason: string }).reason;
+    expect(deniedReason).toMatch(/denied by/);
+    expect(deniedReason).not.toMatch(/seatbelt_request_access/);
+
+    const invalidReason = (guard({ toolName: "read", input: {} }) as { reason: string }).reason;
+    expect(invalidReason).toMatch(/missing or invalid path/);
+    expect(invalidReason).not.toMatch(/seatbelt_request_access/);
+
+    const unavailableReason = captureGuard({ isActive: () => true, getPolicy: () => undefined })({ toolName: "read", input: { path: "README.md" } }) as {
+      reason: string;
+    };
+    expect(unavailableReason.reason).toMatch(/policy is unavailable/);
+    expect(unavailableReason.reason).not.toMatch(/seatbelt_request_access/);
   });
 
   it("blocks guarded tools when active but policy is unavailable", () => {
