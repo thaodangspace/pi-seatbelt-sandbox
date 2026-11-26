@@ -4,7 +4,7 @@ import { isAbsolute, join, resolve, sep } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { canon } from "./policy.ts";
 import type { EnvironmentMode } from "./environment.ts";
-import type { Grant } from "./grants.ts";
+import { applyGrants, type Grant } from "./grants.ts";
 import type { NetworkMode } from "./seatbelt.ts";
 
 export interface SeatbeltConfig {
@@ -349,28 +349,6 @@ export function loadProjectOverride(cwd: string): ConfigOverride {
 }
 
 /**
- * Widen the trusted base with grants (FR7 step 3). A write grant implies read,
- * network grants only ever widen, and deny lists are left untouched.
- */
-function widenWithGrants(base: SeatbeltConfig, grants: Grant[], cwd: string): SeatbeltConfig {
-  const readable = [...base.readable];
-  const writable = [...base.writable];
-  let networkMode = base.network.mode;
-
-  for (const grant of grants) {
-    if (grant.kind === "network") {
-      if (NETWORK_STRICTNESS[grant.mode] > NETWORK_STRICTNESS[networkMode]) networkMode = grant.mode;
-      continue;
-    }
-    const target = canon(grant.path, cwd);
-    if (grant.kind === "write") writable.push(target);
-    readable.push(target);
-  }
-
-  return { ...base, readable, writable, network: { mode: networkMode } };
-}
-
-/**
  * Compose the effective configuration in FR7 order: base, grants, project
  * restrictions (with the pre-grant base as the widening ceiling), expansion.
  */
@@ -381,7 +359,7 @@ export function composeConfig(
   cwd: string,
   sourcePath?: string,
 ): SeatbeltConfig {
-  const granted = widenWithGrants(base, grants, cwd);
+  const granted = applyGrants(base, grants, cwd);
   const restricted = applyProjectRestrictions(granted, project, cwd, sourcePath, base);
   return expandConfig(restricted, cwd);
 }
