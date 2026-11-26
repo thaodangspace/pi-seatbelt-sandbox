@@ -1,11 +1,30 @@
-import { accessSync, constants } from "node:fs";
+import { accessSync, constants, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createBashTool } from "@earendil-works/pi-coding-agent";
 import { createSeatbeltBashOperations } from "./src/bash.ts";
 import { SANDBOX_EXEC_PATH } from "./src/sandbox-exec.ts";
-import { ConfigError, DEFAULT_CONFIG, composeConfig, expandConfigPath, loadBaseConfig, loadProjectOverride, type SeatbeltConfig } from "./src/config.ts";
-import { applyGrantStoreDeny } from "./src/grants.ts";
+import {
+  ConfigError,
+  DEFAULT_CONFIG,
+  composeConfig,
+  expandConfigPath,
+  loadBaseConfig,
+  loadProjectOverride,
+  type ConfigOverride,
+  type SeatbeltConfig,
+} from "./src/config.ts";
+import {
+  addGrant,
+  applyGrantStoreDeny,
+  applyGrants,
+  formatGrantList,
+  loadGrants,
+  sanitizeForDisplay,
+  type Grant,
+  type LoadGrantsResult,
+  type NewGrantInput,
+} from "./src/grants.ts";
 import { buildPolicy, type PathPolicy } from "./src/policy.ts";
 import { createProfileFile, type ProfileFile } from "./src/seatbelt.ts";
 import { registerToolGuard } from "./src/tool-guard.ts";
@@ -18,6 +37,23 @@ export function bashRuntimeRoute(state: RuntimeState, hasProfile: boolean): Bash
   if (state === "disabled" || state === "degraded") return "local";
   if (state === "active" && hasProfile) return "sandboxed";
   return "refused";
+}
+
+/**
+ * The runtime surface handed to `registerAccessTool` (Phase 5). The access tool
+ * asks for one grant to be installed and then re-activates the runtime; it never
+ * touches the closure directly.
+ */
+export interface RuntimeAccessors {
+  getConfig(): SeatbeltConfig;
+  setConfig(next: SeatbeltConfig): void;
+  getState(): RuntimeState;
+  getFailureReason(): string | undefined;
+  getSessionRoot(): string;
+  getAgentDir(): string;
+  isStoreLocked(): boolean;
+  recordSessionGrant(input: NewGrantInput): void;
+  activate(ctx: Pick<ExtensionContext, "ui">): Promise<void>;
 }
 
 const FAIL_CLOSED_MESSAGE = "bash is disabled: Seatbelt sandbox unavailable";
@@ -38,6 +74,13 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
   let config: SeatbeltConfig = DEFAULT_CONFIG;
   let sessionRoot = resolveSessionRoot(process.cwd());
   let failureReason: string | undefined;
+  // Grants: `grants` mirrors the persisted per-project store, while
+  // `sessionGrants` and `sessionNetwork` are session-only and never written.
+  let grants: Grant[] = [];
+  let sessionGrants: Grant[] = [];
+  let sessionNetwork: SeatbeltConfig["network"]["mode"] | undefined;
+  let grantStoreLocked = false;
+  let projectOverride: ConfigOverride | undefined;
 
   const baseBash = createBashTool(process.cwd());
 
@@ -77,6 +120,16 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     sessionRoot = resolveSessionRoot(ctx.cwd);
+    // Session-only changes are dropped on every session start (FR7).
+    sessionGrants = [];
+    sessionNetwork = undefined;
+    // Loading is read-only: a corrupt, foreign, or workspace-hosted store yields
+    // no grants plus exactly one notice and is never rewritten here.
+    const loaded = loadGrants(getAgentDir(), sessionRoot);
+    grants = loaded.grants;
+    grantStoreLocked = loaded.warning !== undefined;
+    const notice = grantStartNotice(loaded);
+    if (notice) ctx.ui.notify(notice.text, notice.type);
     await activate(ctx, true);
   });
 
@@ -113,9 +166,14 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
           ctx.ui.notify("Usage: /seatbelt network none|localhost|all", "error");
           return;
         }
-        config = { ...config, network: { mode } };
-        await activate(ctx);
-        ctx.ui.notify(`Seatbelt network mode set to ${mode} for this session`, "info");
+        try {
+          sessionNetwork = mode;
+          rebuildConfig();
+          await activate(ctx);
+          ctx.ui.notify(`Seatbelt network mode set to ${mode} for this session`, "info");
+        } catch (error) {
+          failClosed(ctx, errorMessage(error));
+        }
         return;
       }
       case "allow-read":
@@ -127,10 +185,9 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
         }
         try {
           const expanded = expandConfigPath(value, { cwd: sessionRoot });
-          config =
-            cmd === "allow-read"
-              ? { ...config, readable: [...config.readable, expanded] }
-              : { ...config, writable: [...config.writable, expanded] };
+          // Session grants live in memory only and apply above the project layer.
+          sessionGrants = addGrant(sessionGrants, { kind: cmd === "allow-read" ? "read" : "write", path: expanded }, sessionRoot).grants;
+          rebuildConfig();
           await activate(ctx);
           ctx.ui.notify(`Added ${expanded} for this session`, "info");
         } catch (error) {
@@ -158,15 +215,22 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
   }
 
   /**
-   * The single configuration mutator: nothing else assigns `config`. Phase 3
-   * covers the first three FR7 layers plus the store deny; later phases add the
-   * grant layer before the project layer and session changes before the denies.
+   * The single configuration mutator: no command composes `config`. Layers are
+   * defaults → global config → persisted grants → project restrictions (with
+   * the pre-grant base as the widening ceiling) → session grants → session
+   * network override → store deny paths, so deny lists stay append-only and
+   * only grants and an explicit session command can change the network mode.
    */
   function rebuildConfig(): void {
     const base = loadBaseConfig(sessionRoot);
+    projectOverride = loadProjectOverride(sessionRoot);
     const projectConfigPath = join(sessionRoot, CONFIG_DIR_NAME, "seatbelt.json");
-    const composed = composeConfig(base, loadProjectOverride(sessionRoot), [], sessionRoot, projectConfigPath);
-    config = applyGrantStoreDeny(composed, getAgentDir());
+    const withGrants = composeConfig(base, projectOverride, grants, sessionRoot, projectConfigPath);
+    const withSessionGrants = applyGrants(withGrants, sessionGrants, sessionRoot);
+    // `/seatbelt network <mode>` replaces the composed mode, so it can narrow as
+    // well as widen. Without the command, persisted grants keep their own mode.
+    const withSessionNetwork = sessionNetwork === undefined ? withSessionGrants : { ...withSessionGrants, network: { mode: sessionNetwork } };
+    config = applyGrantStoreDeny(withSessionNetwork, getAgentDir());
   }
 
   async function activate(ctx: Pick<ExtensionContext, "ui">, reloadConfig = false): Promise<void> {
@@ -210,7 +274,7 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
       process.env[SHARED_PROFILE_ENV] = profile.path;
       process.env[SHARED_PROFILE_SCOPE_ENV] = SHARED_PROFILE_SCOPE;
       state = "active";
-      ctx.ui.setStatus("seatbelt", `🔒 seatbelt: net=${config.network.mode}`);
+      ctx.ui.setStatus("seatbelt", statusText());
       ctx.ui.notify("Seatbelt sandbox initialized", "info");
     } catch (error) {
       try {
@@ -255,10 +319,50 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
     if (old) await old.dispose();
   }
 
+  /** Status line shown while active: network mode plus the effective grant count. */
+  function statusText(): string {
+    const count = grants.length + sessionGrants.length;
+    return `🔒 seatbelt: net=${config.network.mode}${count > 0 ? ` +${count} grants` : ""}`;
+  }
+
+  /** Effective grants, then session-only entries marked `(session)` (FR9/FR10). */
+  function grantSection(): string[] {
+    const lines = [
+      ...formatGrantList(grants).map((line) => `  - ${line}`),
+      ...formatGrantList(sessionGrants).map((line) => `  - ${line}  (session)`),
+    ];
+    return lines.length === 0 ? ["  (none)"] : lines;
+  }
+
+  /**
+   * Runtime accessors for `registerAccessTool` (Phase 5): the tool asks here to
+   * install a configuration it derived from `getConfig()`, and to record a
+   * session grant. `recordSessionGrant` never persists and never activates.
+   */
+  const runtimeAccessors: RuntimeAccessors = {
+    getConfig: () => config,
+    setConfig: (next) => {
+      // The only assignment outside rebuildConfig(): the access tool installs a
+      // configuration it composed in the same FR7 order. Commands never use it.
+      config = next;
+    },
+    getState: () => state,
+    getFailureReason: () => failureReason,
+    getSessionRoot: () => sessionRoot,
+    getAgentDir: () => getAgentDir(),
+    isStoreLocked: () => grantStoreLocked,
+    recordSessionGrant: (input) => {
+      sessionGrants = addGrant(sessionGrants, input, sessionRoot).grants;
+      rebuildConfig();
+    },
+    activate: (ctx) => activate(ctx),
+  };
+
   function formatStatus(): string {
     const lines = [
       "Seatbelt sandbox:",
       `  state: ${state}${failureReason ? ` (${failureReason})` : ""}`,
+      `  status: ${statusText()}`,
       `  network: ${config.network.mode}`,
       `  environment: ${config.environment.mode}${config.environment.mode === "filtered" ? ` (${config.environment.deny.length} denied variables)` : ""}`,
       `  workspace: ${sessionRoot}`,
@@ -273,6 +377,8 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
       ...config.denyRead.map((p) => `  - ${p}`),
       "Deny write:",
       ...config.denyWrite.map((p) => `  - ${p}`),
+      "Grants:",
+      ...grantSection(),
     ];
     return lines.join("\n");
   }
@@ -293,6 +399,40 @@ function bashRefusedCommandResult(reason?: string) {
     cancelled: false,
     truncated: false,
   };
+}
+
+interface GrantStartNotice {
+  type: "info" | "warning" | "error";
+  text: string;
+}
+
+/**
+ * The one grant notice emitted on session start (FR10). A warning means the
+ * store was not applied at all, so it is the only thing worth reporting; a
+ * missing target is reported next to the applied count and stays on disk.
+ */
+function grantStartNotice(loaded: LoadGrantsResult): GrantStartNotice | undefined {
+  switch (loaded.warning) {
+    case "corrupt":
+      return { type: "error", text: "Seatbelt grant store is unusable (corrupt); run /seatbelt grants reset" };
+    case "version":
+      return { type: "error", text: "Seatbelt grant store has an unsupported version; run /seatbelt grants reset" };
+    case "store-inside-workspace":
+      return { type: "warning", text: "Seatbelt grant store directory is inside the workspace; grants are disabled for this project" };
+    case "project-mismatch":
+      return { type: "warning", text: "Seatbelt grant store belongs to another project; grants are disabled for this project" };
+    case undefined:
+      break;
+  }
+
+  if (loaded.grants.length === 0) return undefined;
+  const applied = `Seatbelt grants: ${loaded.grants.length} applied for this project`;
+  const missing: string[] = [];
+  for (const grant of loaded.grants) {
+    if (grant.kind !== "network" && !existsSync(grant.path)) missing.push(`${grant.id} ${sanitizeForDisplay(grant.path)}`);
+  }
+  if (missing.length === 0) return { type: "info", text: applied };
+  return { type: "info", text: `${applied}; missing grant targets: ${missing.join(", ")}` };
 }
 
 function errorMessage(error: unknown): string {
