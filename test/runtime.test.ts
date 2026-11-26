@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
@@ -81,7 +81,12 @@ async function installRuntime(createProfileFile: () => Promise<ProfileFile>, opt
   let userBash: ((event: { cwd: string }) => unknown) | undefined;
   let toolCall: ((event: { toolName: string; input: unknown }) => unknown) | undefined;
   let command: ((args: string, ctx: any) => Promise<void>) | undefined;
-  const ui = { setStatus: vi.fn(), notify: vi.fn(), select: vi.fn<(...args: any[]) => Promise<string | undefined>>() };
+  const ui = {
+    setStatus: vi.fn(),
+    notify: vi.fn(),
+    select: vi.fn<(...args: any[]) => Promise<string | undefined>>(),
+    confirm: vi.fn<(...args: any[]) => Promise<boolean>>(),
+  };
   const appendEntry = vi.fn();
   const baseCtx = { cwd: workspace, ui, hasUI: true, signal: undefined as AbortSignal | undefined };
   const pi = {
@@ -371,6 +376,196 @@ describe("runtime grants", () => {
     });
     expect(runtime.toolCall("read", join(persistedTarget, "file.txt"))).toBeUndefined();
     expect(runtime.ui.setStatus).toHaveBeenLastCalledWith("seatbelt", "🔒 seatbelt: net=localhost +1 grants");
+  });
+});
+
+describe("seatbelt grant commands", () => {
+  /** A profile factory whose call count is the number of activations. */
+  function countingProfile() {
+    return vi.fn<() => Promise<ProfileFile>>().mockImplementation(() => Promise.resolve(fakeProfile()));
+  }
+
+  function seed(runtime: { agentDir: string; workspace: string }, grants: Grant[]): void {
+    saveGrants(runtime.agentDir, runtime.workspace, grants);
+  }
+
+  it("lists persisted grants with id, kind, target, and expiry, and marks session grants", async () => {
+    const target = tempDir("seatbelt-runtime-listed-");
+    const created = countingProfile();
+    const runtime = await installRuntime(created);
+    const persisted = addGrant([], { kind: "read", path: target }, runtime.workspace).grant;
+    if (persisted.kind === "network") throw new Error("expected a path grant");
+    seed(runtime, [persisted]);
+    await runtime.start();
+    const sessionTarget = join(runtime.workspace, "build");
+    await runtime.command(`allow-write ${sessionTarget}`);
+    const activations = created.mock.calls.length;
+
+    await runtime.command("grants");
+
+    expect(runtime.ui.notify.mock.calls.at(-1)?.[1]).toBe("info");
+    const text = String(runtime.ui.notify.mock.calls.at(-1)?.[0]);
+    expect(text).toContain("Seatbelt grants for this project:");
+    expect(text).toContain(persisted.id);
+    expect(text).toContain(`read ${persisted.path}`);
+    expect(text).toContain("created ");
+    expect(text).toContain("no expiry");
+    const sessionLines = text.split("\n").filter((line) => line.includes("(session)"));
+    expect(sessionLines).toHaveLength(1);
+    expect(sessionLines[0]).toMatch(/^[0-9a-f]{8} write /);
+    expect(sessionLines[0]).toContain(join(realpathSync(runtime.workspace), "build"));
+    // Listing never activates.
+    expect(created.mock.calls.length).toBe(activations);
+  });
+
+  it("reports that there are no grants instead of an empty list", async () => {
+    const runtime = await installRuntime(countingProfile());
+    await runtime.start();
+
+    await runtime.command("grants");
+
+    expect(runtime.ui.notify.mock.calls.at(-1)).toEqual(["No seatbelt grants for this project.", "info"]);
+  });
+
+  it("revokes one persisted grant and re-activates exactly once", async () => {
+    const firstTarget = tempDir("seatbelt-runtime-revoke-a-");
+    const secondTarget = tempDir("seatbelt-runtime-revoke-b-");
+    const created = countingProfile();
+    const runtime = await installRuntime(created);
+    const first = addGrant([], { kind: "read", path: firstTarget }, runtime.workspace).grant;
+    const second = addGrant([], { kind: "read", path: secondTarget }, runtime.workspace).grant;
+    seed(runtime, [first, second]);
+    await runtime.start();
+    const activations = created.mock.calls.length;
+
+    await runtime.command(`revoke ${first.id}`);
+
+    expect(created.mock.calls.length).toBe(activations + 1);
+    expect(loadGrants(runtime.agentDir, runtime.workspace).grants.map((grant) => grant.id)).toEqual([second.id]);
+    expect(notifyTexts(runtime.ui)).toContain(`Revoked seatbelt grant ${first.id}`);
+    expect(runtime.ui.setStatus).toHaveBeenLastCalledWith("seatbelt", "🔒 seatbelt: net=localhost +1 grants");
+    // The revoked root is no longer readable; the surviving grant still is.
+    expect(runtime.toolCall("read", join(firstTarget, "file.txt"))).toMatchObject({ block: true });
+    expect(runtime.toolCall("read", join(secondTarget, "file.txt"))).toBeUndefined();
+  });
+
+  it("revokes all persisted grants and leaves an empty grant list in the store", async () => {
+    const firstTarget = tempDir("seatbelt-runtime-revoke-all-a-");
+    const secondTarget = tempDir("seatbelt-runtime-revoke-all-b-");
+    const created = countingProfile();
+    const runtime = await installRuntime(created);
+    const first = addGrant([], { kind: "read", path: firstTarget }, runtime.workspace).grant;
+    const second = addGrant([], { kind: "read", path: secondTarget }, runtime.workspace).grant;
+    seed(runtime, [first, second]);
+    await runtime.start();
+    const activations = created.mock.calls.length;
+
+    await runtime.command("revoke all");
+
+    expect(created.mock.calls.length).toBe(activations + 1);
+    const stored = JSON.parse(readFileSync(storePathOf(runtime), "utf8"));
+    expect(stored.grants).toEqual([]);
+    expect(notifyTexts(runtime.ui)).toContain("Revoked all seatbelt grants for this project");
+    expect(runtime.ui.setStatus).toHaveBeenLastCalledWith("seatbelt", "🔒 seatbelt: net=localhost");
+  });
+
+  it("reports an unknown or session-only id without activating", async () => {
+    const target = tempDir("seatbelt-runtime-revoke-unknown-");
+    const sessionTarget = tempDir("seatbelt-runtime-revoke-session-");
+    const created = countingProfile();
+    const runtime = await installRuntime(created);
+    const persisted = addGrant([], { kind: "read", path: target }, runtime.workspace).grant;
+    seed(runtime, [persisted]);
+    await runtime.start();
+    await runtime.command(`allow-read ${sessionTarget}`);
+    await runtime.command("grants");
+    const sessionLine = String(runtime.ui.notify.mock.calls.at(-1)?.[0])
+      .split("\n")
+      .find((line) => line.includes("(session)"));
+    const sessionId = sessionLine?.split(/\s+/)[0];
+    expect(sessionId).toMatch(/^[0-9a-f]{8}$/);
+    const before = readFileSync(storePathOf(runtime));
+    const activations = created.mock.calls.length;
+
+    await runtime.command(`revoke ${sessionId}`);
+
+    expect(created.mock.calls.length).toBe(activations);
+    expect(runtime.ui.notify.mock.calls.at(-1)).toEqual([
+      `Seatbelt grant ${sessionId} is not a persisted grant for this project`,
+      "error",
+    ]);
+    expect(readFileSync(storePathOf(runtime)).equals(before)).toBe(true);
+  });
+
+  it("deletes the grant store only when the reset confirmation is accepted", async () => {
+    const target = tempDir("seatbelt-runtime-reset-");
+    const created = countingProfile();
+    const runtime = await installRuntime(created);
+    const persisted = addGrant([], { kind: "read", path: target }, runtime.workspace).grant;
+    seed(runtime, [persisted]);
+    const storePath = storePathOf(runtime);
+    await runtime.start();
+    const before = readFileSync(storePath);
+    const activations = created.mock.calls.length;
+
+    runtime.ui.confirm.mockResolvedValue(false);
+    await runtime.command("grants reset");
+
+    expect(runtime.ui.confirm.mock.calls[0]?.[0]).toBe("Reset seatbelt grant store");
+    expect(String(runtime.ui.confirm.mock.calls[0]?.[1])).toContain(storePath);
+    expect(created.mock.calls.length).toBe(activations);
+    expect(readFileSync(storePath).equals(before)).toBe(true);
+    expect(notifyTexts(runtime.ui)).toContain("Seatbelt grant store kept");
+
+    runtime.ui.confirm.mockResolvedValue(true);
+    await runtime.command("grants reset");
+
+    expect(existsSync(storePath)).toBe(false);
+    expect(created.mock.calls.length).toBe(activations + 1);
+    expect(notifyTexts(runtime.ui)).toContain("Seatbelt grant store deleted");
+    expect(runtime.ui.setStatus).toHaveBeenLastCalledWith("seatbelt", "🔒 seatbelt: net=localhost");
+  });
+
+  it("resets a corrupt grant store and persists grants again afterwards", async () => {
+    const target = tempDir("seatbelt-runtime-reset-corrupt-");
+    const created = countingProfile();
+    const runtime = await installRuntime(created);
+    const storePath = storePathOf(runtime);
+    mkdirSync(dirname(storePath), { recursive: true });
+    writeFileSync(storePath, "{ nope");
+    await runtime.start();
+    expect(runtime.ui.setStatus).toHaveBeenLastCalledWith("seatbelt", "🔒 seatbelt: net=localhost");
+    runtime.ui.confirm.mockResolvedValue(true);
+
+    await runtime.command("grants reset");
+
+    expect(existsSync(storePath)).toBe(false);
+    expect(runtime.ui.setStatus).toHaveBeenLastCalledWith("seatbelt", "🔒 seatbelt: net=localhost");
+    expect(runtime.ui.setStatus.mock.calls.some(([, text]) => /\+\d+ grants/.test(String(text)))).toBe(false);
+
+    // The reset cleared the locked store: a remembered grant persists again.
+    runtime.ui.select.mockResolvedValue("Allow and remember for this project");
+    const result = await runtime.requestAccess({ kind: "read", path: target, reason: "after the store reset" });
+    expect(String(result.content[0].text)).toMatch(/remembered for this project/);
+    expect(loadGrants(runtime.agentDir, runtime.workspace).grants).toHaveLength(1);
+  });
+
+  it("keeps the grant count in the status line after a revoke", async () => {
+    const firstTarget = tempDir("seatbelt-runtime-status-a-");
+    const secondTarget = tempDir("seatbelt-runtime-status-b-");
+    const runtime = await installRuntime(countingProfile());
+    const first = addGrant([], { kind: "read", path: firstTarget }, runtime.workspace).grant;
+    const second = addGrant([], { kind: "read", path: secondTarget }, runtime.workspace).grant;
+    seed(runtime, [first, second]);
+    await runtime.start();
+
+    await runtime.command(`revoke ${first.id}`);
+    await runtime.command("");
+
+    const status = String(runtime.ui.notify.mock.calls.at(-1)?.[0]);
+    expect(status).toContain("🔒 seatbelt: net=localhost +1 grants");
+    expect(status).toContain(`  - ${second.id}  read  ${second.kind === "network" ? second.mode : second.path}`);
+    expect(status).not.toContain(first.id);
   });
 });
 

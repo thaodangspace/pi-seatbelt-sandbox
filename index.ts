@@ -1,4 +1,4 @@
-import { accessSync, constants, existsSync } from "node:fs";
+import { accessSync, constants, existsSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createBashTool } from "@earendil-works/pi-coding-agent";
@@ -18,8 +18,11 @@ import {
   applyGrantStoreDeny,
   applyGrants,
   formatGrantList,
+  grantStorePath,
+  GrantStoreError,
   loadGrants,
   pruneExpired,
+  revokeGrant,
   sanitizeForDisplay,
   saveGrants,
   type Grant,
@@ -214,6 +217,89 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
         }
         return;
       }
+      case "grants": {
+        if (rest[0] === "reset") {
+          // Recovery path (FR9). It never reads the store, so it works while the
+          // store is locked, corrupt, or owned by another project.
+          const storePath = grantStorePath(getAgentDir(), sessionRoot);
+          const confirmed = await ctx.ui.confirm(
+            "Reset seatbelt grant store",
+            `Delete every persisted seatbelt grant for this project (${sanitizeForDisplay(storePath)})?`,
+            ctx.signal ? { signal: ctx.signal } : undefined,
+          );
+          if (!confirmed) {
+            ctx.ui.notify("Seatbelt grant store kept", "info");
+            return;
+          }
+          try {
+            rmSync(storePath, { force: true });
+          } catch (error) {
+            ctx.ui.notify(`Seatbelt grant store could not be deleted: ${sanitizeForDisplay(errorMessage(error))}`, "error");
+            return;
+          }
+          grants = [];
+          grantStoreLocked = false;
+          try {
+            rebuildConfig();
+            await activate(ctx);
+          } catch (error) {
+            failClosed(ctx, errorMessage(error));
+            return;
+          }
+          ctx.ui.notify("Seatbelt grant store deleted", "info");
+          return;
+        }
+
+        // Listing is read-only: it never activates and never touches the store.
+        const lines = [
+          ...formatGrantList(grants),
+          ...formatGrantList(sessionGrants).map((line) => `${line}  (session)`),
+        ].map((line) => sanitizeForDisplay(line));
+        ctx.ui.notify(
+          lines.length === 0
+            ? "No seatbelt grants for this project."
+            : ["Seatbelt grants for this project:", ...lines].join("\n"),
+          "info",
+        );
+        return;
+      }
+      case "revoke": {
+        const id = rest[0];
+        if (!id) {
+          ctx.ui.notify("Usage: /seatbelt revoke <id|all>", "error");
+          return;
+        }
+        if (id === "all") {
+          try {
+            saveGrants(getAgentDir(), sessionRoot, []);
+            grants = [];
+            grantStoreLocked = false;
+            rebuildConfig();
+            await activate(ctx);
+            ctx.ui.notify("Revoked all seatbelt grants for this project", "info");
+          } catch (error) {
+            notifyStoreFailure(ctx, error);
+          }
+          return;
+        }
+        // Case-sensitive match against persisted grants only. A session grant id
+        // and an unknown id must not activate: nothing was revoked (FR9).
+        if (!grants.some((grant) => grant.id === id)) {
+          ctx.ui.notify(`Seatbelt grant ${sanitizeForDisplay(id)} is not a persisted grant for this project`, "error");
+          return;
+        }
+        try {
+          const next = revokeGrant(grants, id);
+          saveGrants(getAgentDir(), sessionRoot, next);
+          grants = pruneExpired(next);
+          rebuildConfig();
+          await activate(ctx);
+          ctx.ui.notify(`Revoked seatbelt grant ${sanitizeForDisplay(id)}`, "info");
+        } catch (error) {
+          notifyStoreFailure(ctx, error);
+        }
+        return;
+      }
       case "off":
         state = "initializing";
         policy = undefined;
@@ -229,7 +315,10 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
         }
         return;
       default:
-        ctx.ui.notify("Usage: /seatbelt [network none|localhost|all | allow-read <path> | allow-write <path> | off]", "error");
+        ctx.ui.notify(
+          "Usage: /seatbelt [network none|localhost|all | allow-read <path> | allow-write <path> | grants | revoke <id|all> | grants reset | off]",
+          "error",
+        );
     }
   }
 
@@ -313,6 +402,19 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
       ctx.ui.setStatus("seatbelt", "seatbelt: degraded");
       ctx.ui.notify(`Seatbelt unavailable; falling back to unsandboxed bash: ${reason}`, "warning");
     }
+  }
+
+  /**
+   * A grant command whose store write failed must not change the runtime: the
+   * write did not land, so the notice is the only effect. `GrantStoreError`
+   * already carries its own prefix and the `/seatbelt grants reset` hint.
+   */
+  function notifyStoreFailure(ctx: Pick<ExtensionCommandContext, "ui">, error: unknown): void {
+    if (error instanceof GrantStoreError) {
+      ctx.ui.notify(sanitizeForDisplay(errorMessage(error)), "error");
+      return;
+    }
+    failClosed(ctx, errorMessage(error));
   }
 
   function failClosed(ctx: Pick<ExtensionCommandContext, "ui">, reason: string): void {
