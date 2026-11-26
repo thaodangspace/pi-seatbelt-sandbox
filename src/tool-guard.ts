@@ -1,8 +1,13 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { sanitizeForDisplay } from "./grants.ts";
 import { assertCanRead, assertCanWrite, type PathPolicy } from "./policy.ts";
 
 const READERS = new Set(["read", "grep", "find", "ls"]);
 const WRITERS = new Set(["write", "edit"]);
+
+/** Only the outside-roots block teaches the agent how to ask (FR11). */
+const OUTSIDE_ROOTS = "outside allowed roots";
+const REQUEST_ACCESS_HINT = " (call seatbelt_request_access to ask the user)";
 
 export interface ToolGuardState {
   isActive(): boolean;
@@ -26,9 +31,18 @@ export function registerToolGuard(pi: ExtensionAPI, state: ToolGuardState): void
       if (mode === "read") assertCanRead(target, policy);
       else assertCanWrite(target, policy);
     } catch (error) {
-      return { block: true, reason: error instanceof Error ? error.message : String(error) };
+      return { block: true, reason: blockReason(error) };
     }
   });
+}
+
+/**
+ * Sanitized block reason, plus the request-tool hint for the outside-roots case.
+ * Deny-rule, invalid-path, and unavailable-policy reasons stay unchanged.
+ */
+function blockReason(error: unknown): string {
+  const reason = sanitizeForDisplay(error instanceof Error ? error.message : String(error));
+  return reason.includes(OUTSIDE_ROOTS) ? `${reason}${REQUEST_ACCESS_HINT}` : reason;
 }
 
 function requirePolicy(state: ToolGuardState): PathPolicy {

@@ -3,7 +3,6 @@ import { join, resolve } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createBashTool } from "@earendil-works/pi-coding-agent";
 import { createSeatbeltBashOperations } from "./src/bash.ts";
-import { SANDBOX_EXEC_PATH } from "./src/sandbox-exec.ts";
 import {
   ConfigError,
   DEFAULT_CONFIG,
@@ -20,13 +19,18 @@ import {
   applyGrants,
   formatGrantList,
   loadGrants,
+  pruneExpired,
   sanitizeForDisplay,
+  saveGrants,
   type Grant,
+  type GrantKind,
   type LoadGrantsResult,
   type NewGrantInput,
 } from "./src/grants.ts";
 import { buildPolicy, type PathPolicy } from "./src/policy.ts";
 import { createProfileFile, type ProfileFile } from "./src/seatbelt.ts";
+import { SANDBOX_EXEC_PATH } from "./src/sandbox-exec.ts";
+import { registerAccessTool } from "./src/access-tool.ts";
 import { registerToolGuard } from "./src/tool-guard.ts";
 import { cwdRefusalReasonForRuntime, resolveSessionRoot } from "./src/workspace.ts";
 
@@ -37,6 +41,17 @@ export function bashRuntimeRoute(state: RuntimeState, hasProfile: boolean): Bash
   if (state === "disabled" || state === "degraded") return "local";
   if (state === "active" && hasProfile) return "sandboxed";
   return "refused";
+}
+
+/**
+ * One decision of the access tool, as written to the session record (FR10).
+ * The target is the canonical path for read/write and the requested mode for
+ * network; the agent's `reason` text is never part of the record.
+ */
+export interface GrantDecisionRecord {
+  kind: GrantKind;
+  decision: "session" | "remember" | "deny";
+  target: string;
 }
 
 /**
@@ -53,6 +68,10 @@ export interface RuntimeAccessors {
   getAgentDir(): string;
   isStoreLocked(): boolean;
   recordSessionGrant(input: NewGrantInput): void;
+  /** Write one grant to the per-project store, then rebuild. May throw `GrantStoreError`. */
+  persistGrant(input: NewGrantInput): Grant;
+  /** Append the FR10 session record. Best effort: a failure is swallowed. */
+  recordDecision(record: GrantDecisionRecord): void;
   activate(ctx: Pick<ExtensionContext, "ui">): Promise<void>;
 }
 
@@ -335,15 +354,16 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
   }
 
   /**
-   * Runtime accessors for `registerAccessTool` (Phase 5): the tool asks here to
-   * install a configuration it derived from `getConfig()`, and to record a
-   * session grant. `recordSessionGrant` never persists and never activates.
+   * Runtime accessors for `registerAccessTool` (Phase 5). The tool asks here to
+   * persist or record one grant and to re-activate; it never composes a
+   * configuration. `recordSessionGrant` and `persistGrant` rebuild in FR7 order
+   * and neither one activates.
    */
   const runtimeAccessors: RuntimeAccessors = {
     getConfig: () => config,
     setConfig: (next) => {
-      // The only assignment outside rebuildConfig(): the access tool installs a
-      // configuration it composed in the same FR7 order. Commands never use it.
+      // Kept for the accessor surface. The access tool never calls it: the
+      // rebuild in `recordSessionGrant`/`persistGrant` is the only composer.
       config = next;
     },
     getState: () => state,
@@ -355,8 +375,26 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
       sessionGrants = addGrant(sessionGrants, input, sessionRoot).grants;
       rebuildConfig();
     },
+    // The tool's only durable write. It rebuilds in FR7 order and never
+    // activates: the tool decides the session fallback and calls `activate`.
+    persistGrant: (input) => {
+      const next = addGrant(grants, input, sessionRoot);
+      saveGrants(getAgentDir(), sessionRoot, next.grants);
+      grants = pruneExpired(next.grants);
+      rebuildConfig();
+      return next.grant;
+    },
+    recordDecision: (record) => {
+      try {
+        pi.appendEntry("seatbelt-grant", record);
+      } catch {
+        // The session record is best effort (FR10).
+      }
+    },
     activate: (ctx) => activate(ctx),
   };
+
+  registerAccessTool(pi, runtimeAccessors);
 
   function formatStatus(): string {
     const lines = [

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { addGrant, grantStorePath, saveGrants, type Grant } from "../src/grants.ts";
+import { addGrant, grantStorePath, loadGrants, saveGrants, type Grant } from "../src/grants.ts";
 import type { ProfileFile } from "../src/seatbelt.ts";
 import { SANDBOX_EXEC_PATH } from "../src/sandbox-exec.ts";
 
@@ -74,16 +74,20 @@ async function installRuntime(createProfileFile: () => Promise<ProfileFile>, opt
   });
   const { default: seatbeltSandbox } = await import("../index.ts");
 
-  let bashTool: { execute: (...args: any[]) => unknown } | undefined;
+  // Capture every registered tool by name: the extension registers the sandboxed
+  // bash tool and the access-request tool, so a single-slot stub would hide one.
+  const tools = new Map<string, { name: string; label?: string; execute: (...args: any[]) => Promise<any> }>();
   let sessionStart: ((event: unknown, ctx: any) => Promise<void>) | undefined;
   let userBash: ((event: { cwd: string }) => unknown) | undefined;
   let toolCall: ((event: { toolName: string; input: unknown }) => unknown) | undefined;
   let command: ((args: string, ctx: any) => Promise<void>) | undefined;
-  const ui = { setStatus: vi.fn(), notify: vi.fn() };
+  const ui = { setStatus: vi.fn(), notify: vi.fn(), select: vi.fn<(...args: any[]) => Promise<string | undefined>>() };
+  const appendEntry = vi.fn();
+  const baseCtx = { cwd: workspace, ui, hasUI: true, signal: undefined as AbortSignal | undefined };
   const pi = {
     registerFlag: vi.fn(),
-    registerTool: (tool: typeof bashTool) => {
-      bashTool = tool;
+    registerTool: (tool: { name: string }) => {
+      tools.set(tool.name, tool as never);
     },
     on: (event: string, handler: unknown) => {
       if (event === "session_start") sessionStart = handler as typeof sessionStart;
@@ -94,19 +98,29 @@ async function installRuntime(createProfileFile: () => Promise<ProfileFile>, opt
       command = definition.handler;
     },
     getFlag: () => false,
+    appendEntry,
   };
   seatbeltSandbox(pi as any);
-  if (!bashTool || !sessionStart || !userBash || !toolCall || !command) throw new Error("runtime handlers were not registered");
+  const bashTool = tools.get("bash");
+  const accessTool = tools.get("seatbelt_request_access");
+  if (!bashTool || !accessTool || !sessionStart || !userBash || !toolCall || !command) {
+    throw new Error("runtime handlers were not registered");
+  }
 
   return {
     workspace,
     agentDir,
     ui,
+    appendEntry,
+    tools,
     bashTool,
+    accessTool,
     start: () => sessionStart!({}, { cwd: workspace, ui }),
     userBash: () => userBash!({ cwd: workspace }),
     toolCall: (toolName: string, path: string) => toolCall!({ toolName, input: { path } }),
     command: (args: string) => command!(args, { ui }),
+    requestAccess: (params: unknown, overrides: Record<string, unknown> = {}) =>
+      accessTool!.execute("call-1", params, undefined, undefined, { ...baseCtx, ...overrides }),
   };
 }
 
@@ -356,6 +370,44 @@ describe("runtime grants", () => {
       reason: expect.stringMatching(/outside allowed roots/),
     });
     expect(runtime.toolCall("read", join(persistedTarget, "file.txt"))).toBeUndefined();
+    expect(runtime.ui.setStatus).toHaveBeenLastCalledWith("seatbelt", "🔒 seatbelt: net=localhost +1 grants");
+  });
+});
+
+describe("runtime access tool", () => {
+  it("registers the access tool next to the sandboxed bash tool", async () => {
+    const runtime = await installRuntime(() => Promise.resolve(fakeProfile()));
+
+    expect([...runtime.tools.keys()].sort()).toEqual(["bash", "seatbelt_request_access"]);
+    expect(runtime.bashTool.label).toBe("bash (seatbelt)");
+    expect(runtime.accessTool.name).toBe("seatbelt_request_access");
+  });
+
+  it("persists a remembered grant from the access tool and stays active", async () => {
+    const target = tempDir("seatbelt-runtime-request-");
+    const runtime = await installRuntime(() => Promise.resolve(fakeProfile()));
+    await runtime.start();
+    runtime.ui.select.mockResolvedValue("Allow and remember for this project");
+
+    const result = await runtime.requestAccess({ kind: "read", path: target, reason: "need the shared library" });
+
+    expect(String(result.content[0].text)).toMatch(/remembered for this project/);
+    expect(runtime.ui.select).toHaveBeenCalledOnce();
+    expect(runtime.appendEntry).toHaveBeenCalledWith("seatbelt-grant", {
+      kind: "read",
+      decision: "remember",
+      target: realpathSync(target),
+    });
+
+    const stored = loadGrants(runtime.agentDir, runtime.workspace);
+    expect(stored.warning).toBeUndefined();
+    expect(stored.grants).toHaveLength(1);
+    expect(stored.grants[0]).toMatchObject({ kind: "read", path: realpathSync(target) });
+    expect(readFileSync(storePathOf(runtime), "utf8")).toContain(realpathSync(target));
+
+    // The grant applies to both layers and the runtime never left `active`.
+    expect(runtime.toolCall("read", join(target, "file.txt"))).toBeUndefined();
+    expect(runtime.userBash()).toMatchObject({ operations: expect.anything() });
     expect(runtime.ui.setStatus).toHaveBeenLastCalledWith("seatbelt", "🔒 seatbelt: net=localhost +1 grants");
   });
 });
