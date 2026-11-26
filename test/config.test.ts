@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
-import { DEFAULT_CONFIG, loadConfig, shallowMergeConfig } from "../src/config.ts";
+import { DEFAULT_CONFIG, composeConfig, loadBaseConfig, loadConfig, loadProjectOverride, shallowMergeConfig } from "../src/config.ts";
+import type { Grant } from "../src/grants.ts";
+import { assertCanRead, buildPolicy } from "../src/policy.ts";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 let tempDirs: string[] = [];
@@ -153,5 +155,107 @@ describe("config loading", () => {
 
     expect(() => loadConfig(workspace)).toThrow(/could not read configuration/);
     expect(() => loadConfig(workspace)).toThrow(path);
+  });
+});
+
+const CREATED_AT = "2026-11-26T02:00:00.000Z";
+
+function readGrant(path: string, id = "aaaaaaaa"): Grant {
+  return { id, kind: "read", path, createdAt: CREATED_AT, expiresAt: null };
+}
+
+function writeGrant(path: string, id = "bbbbbbbb"): Grant {
+  return { id, kind: "write", path, createdAt: CREATED_AT, expiresAt: null };
+}
+
+function networkGrant(mode: "localhost" | "all", id = "cccccccc"): Grant {
+  return { id, kind: "network", mode, createdAt: CREATED_AT, expiresAt: null };
+}
+
+describe("grant composition", () => {
+  it("lets a project list narrow a granted root", () => {
+    const workspace = setupConfig({ readable: ["${WORKSPACE}/trusted"], writable: ["${WORKSPACE}/trusted"] });
+    const realWorkspace = realpathSync(workspace);
+    const grantedPath = join(realWorkspace, "trusted", "granted");
+    const project = { readable: ["${WORKSPACE}/trusted/src"], writable: ["${WORKSPACE}/trusted/src"] };
+
+    const composed = composeConfig(
+      loadBaseConfig(workspace),
+      project,
+      [readGrant(grantedPath), writeGrant(grantedPath)],
+      workspace,
+      "project configuration",
+    );
+
+    expect(composed.readable).toEqual([join(realWorkspace, "trusted", "src")]);
+    expect(composed.writable).toEqual([join(realWorkspace, "trusted", "src")]);
+  });
+
+  it("treats the pre-grant base as the ceiling for project lists", () => {
+    const workspace = setupConfig({ readable: ["${WORKSPACE}/trusted"], writable: ["${WORKSPACE}/trusted"] });
+    const realWorkspace = realpathSync(workspace);
+    const grantedPath = join(realWorkspace, "granted");
+
+    expect(() =>
+      composeConfig(
+        loadBaseConfig(workspace),
+        { readable: ["${WORKSPACE}/granted"] },
+        [readGrant(grantedPath)],
+        workspace,
+        "project configuration",
+      ),
+    ).toThrow(/outside the trusted global allowance/);
+  });
+
+  it("unions deny lists in global-then-project order when grants widen", () => {
+    const workspace = setupConfig(
+      {
+        readable: ["${WORKSPACE}"],
+        writable: ["${WORKSPACE}"],
+        denyRead: ["${WORKSPACE}/global-secret"],
+        denyWrite: ["${WORKSPACE}/global-protected"],
+      },
+      {
+        denyRead: ["${WORKSPACE}/project-secret"],
+        denyWrite: ["${WORKSPACE}/project-protected"],
+      },
+    );
+    const realWorkspace = realpathSync(workspace);
+    const grantedPath = join(realWorkspace, "granted");
+
+    const composed = composeConfig(loadBaseConfig(workspace), loadProjectOverride(workspace), [writeGrant(grantedPath)], workspace, "project configuration");
+
+    expect(composed.denyRead).toEqual([join(realWorkspace, "global-secret"), join(realWorkspace, "project-secret")]);
+    expect(composed.denyWrite).toEqual([join(realWorkspace, "global-protected"), join(realWorkspace, "project-protected")]);
+    expect(composed.readable).toContain(grantedPath);
+    expect(composed.writable).toContain(grantedPath);
+  });
+
+  it("only widens network mode, never clamps a granted mode", () => {
+    const workspace = setupConfig({ network: { mode: "localhost" } });
+
+    const widened = composeConfig(loadBaseConfig(workspace), {}, [networkGrant("all")], workspace);
+    expect(widened.network.mode).toBe("all");
+
+    const allBase = shallowMergeConfig(loadBaseConfig(workspace), { network: { mode: "all" } });
+    const notNarrowed = composeConfig(allBase, {}, [networkGrant("localhost")], workspace);
+    expect(notNarrowed.network.mode).toBe("all");
+  });
+
+  it("lets a deny rule beat a granted read root in the path policy", () => {
+    const workspace = setupConfig({
+      readable: ["${WORKSPACE}"],
+      writable: ["${WORKSPACE}"],
+      denyRead: ["${WORKSPACE}/granted/secret"],
+    });
+    const realWorkspace = realpathSync(workspace);
+    const grantedPath = join(realWorkspace, "granted");
+
+    const composed = composeConfig(loadBaseConfig(workspace), loadProjectOverride(workspace), [readGrant(grantedPath)], workspace, "project configuration");
+    const policy = buildPolicy(composed, realWorkspace);
+
+    expect(composed.readable).toContain(grantedPath);
+    expect(() => assertCanRead(join(grantedPath, "secret", "x"), policy)).toThrow(/denied/);
+    expect(() => assertCanRead(join(grantedPath, "ok"), policy)).not.toThrow();
   });
 });
