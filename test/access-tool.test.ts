@@ -53,6 +53,8 @@ interface CapturedTool {
 interface FakeRuntimeOptions {
   storeLocked?: boolean;
   persistError?: Error;
+  /** An `activate` that rejects instead of fail-closing internally. */
+  activateError?: Error;
   /** State the runtime reports after `activate`. Defaults to staying `active`. */
   activateState?: RuntimeState;
 }
@@ -94,6 +96,7 @@ function createRuntime(options: FakeRuntimeOptions = {}) {
     }),
     activate: vi.fn(async () => {
       sessions.activateCalls += 1;
+      if (options.activateError) throw options.activateError;
       if (options.activateState) {
         state = options.activateState;
         failureReason = "profile creation failed";
@@ -412,6 +415,20 @@ describe("access tool grants", () => {
     expect(resultText(result)).toMatch(/grant stays on disk/i);
     expect(resultText(result)).not.toMatch(/re-activated/);
     expect(runtime.decisions).toEqual([{ kind: "read", decision: "remember", target }]);
+  });
+
+  it("reports a fail-closed result when re-activation rejects instead of fail-closing", async () => {
+    const runtime = createRuntime({ activateError: new Error("profile creation threw") });
+    const target = existingTarget();
+    runtime.ui.select.mockResolvedValue(ACCESS_DIALOG_OPTIONS[0]);
+
+    const result = await runtime.request({ kind: "read", path: target, reason: "why" });
+
+    const text = resultText(result);
+    expect(text).toContain("re-activating the sandbox failed");
+    expect(text).toContain("profile creation threw");
+    expect(text).not.toContain("the sandbox was re-activated");
+    expect(runtime.decisions).toEqual([{ kind: "read", decision: "session", target }]);
   });
 
   it("does not record the agent reason in the session record", async () => {

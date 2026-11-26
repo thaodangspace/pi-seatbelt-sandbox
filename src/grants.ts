@@ -101,7 +101,12 @@ function isMissingFile(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
-function warningMessage(warning: GrantStoreWarning): string {
+/**
+ * The message for one store warning. It always carries the reset hint, so a
+ * caller that must refuse a write can turn it straight into a
+ * `GrantStoreError`.
+ */
+export function warningMessage(warning: GrantStoreWarning): string {
   switch (warning) {
     case "corrupt":
       return `grant store is corrupt; ${RESET_HINT}`;

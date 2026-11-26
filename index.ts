@@ -25,6 +25,7 @@ import {
   revokeGrant,
   sanitizeForDisplay,
   saveGrants,
+  warningMessage,
   type Grant,
   type GrantKind,
   type LoadGrantsResult,
@@ -71,7 +72,12 @@ export interface RuntimeAccessors {
   getAgentDir(): string;
   isStoreLocked(): boolean;
   recordSessionGrant(input: NewGrantInput): void;
-  /** Write one grant to the per-project store, then rebuild. May throw `GrantStoreError`. */
+  /**
+   * Re-read the per-project store, merge one grant into it, write it back, then
+   * rebuild. Throws `GrantStoreError` when the store refuses the write (nothing
+   * changed on disk), and a descriptive `Error` when the grant was written but
+   * the rebuild failed: in that case `grants` already matches the store.
+   */
   persistGrant(input: NewGrantInput): Grant;
   /** Append the FR10 session record. Best effort: a failure is swallowed. */
   recordDecision(record: GrantDecisionRecord): void;
@@ -271,6 +277,8 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
         }
         if (id === "all") {
           try {
+            // Revoke-all is a full replacement by definition: it writes an
+            // explicitly empty list and needs no merge.
             saveGrants(getAgentDir(), sessionRoot, []);
             grants = [];
             grantStoreLocked = false;
@@ -282,14 +290,20 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
           }
           return;
         }
-        // Case-sensitive match against persisted grants only. A session grant id
-        // and an unknown id must not activate: nothing was revoked (FR9).
-        if (!grants.some((grant) => grant.id === id)) {
-          ctx.ui.notify(`Seatbelt grant ${sanitizeForDisplay(id)} is not a persisted grant for this project`, "error");
-          return;
-        }
         try {
-          const next = revokeGrant(grants, id);
+          // Re-read immediately before the write: the store may have changed
+          // since `session_start` (another pi session, or a reset followed by
+          // new grants), and writing the snapshot back would silently undo those
+          // changes. A store that cannot be read always blocks the write (FR5).
+          const current = loadGrants(getAgentDir(), sessionRoot);
+          if (current.warning) throw new GrantStoreError(warningMessage(current.warning));
+          // Case-sensitive match against persisted grants only. A session grant
+          // id and an unknown id must not activate: nothing was revoked (FR9).
+          if (!current.grants.some((grant) => grant.id === id)) {
+            ctx.ui.notify(`Seatbelt grant ${sanitizeForDisplay(id)} is not a persisted grant for this project`, "error");
+            return;
+          }
+          const next = revokeGrant(current.grants, id);
           saveGrants(getAgentDir(), sessionRoot, next);
           grants = pruneExpired(next);
           rebuildConfig();
@@ -480,10 +494,25 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
     // The tool's only durable write. It rebuilds in FR7 order and never
     // activates: the tool decides the session fallback and calls `activate`.
     persistGrant: (input) => {
-      const next = addGrant(grants, input, sessionRoot);
+      // Re-read immediately before the write and merge by id: the store may
+      // have changed since `session_start` (another pi session, or a reset
+      // followed by new grants), and a snapshot write would resurrect a grant
+      // somebody else revoked. A store that cannot be read always blocks the
+      // write (FR5), and the tool maps `GrantStoreError` to its fallback.
+      const current = loadGrants(getAgentDir(), sessionRoot);
+      if (current.warning) throw new GrantStoreError(warningMessage(current.warning));
+      const next = addGrant(current.grants, input, sessionRoot);
       saveGrants(getAgentDir(), sessionRoot, next.grants);
+      // Keep the in-memory list in sync with what is on disk *before* rebuilding,
+      // so a rebuild failure cannot leave the grant half-applied (FR8).
       grants = pruneExpired(next.grants);
-      rebuildConfig();
+      try {
+        rebuildConfig();
+      } catch (error) {
+        throw new Error(
+          `grant ${next.grant.id} is on disk but was not applied: the configuration could not be rebuilt (${errorMessage(error)})`,
+        );
+      }
       return next.grant;
     },
     recordDecision: (record) => {

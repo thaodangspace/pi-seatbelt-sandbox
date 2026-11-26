@@ -351,6 +351,54 @@ describe("runtime grants", () => {
     expect(notifyTexts(runtime.ui)).toContain(`Added ${sessionTarget} for this session`);
   });
 
+  it("denies the built-in file tools on the grant store directory", async () => {
+    const runtime = await installRuntime(() => Promise.resolve(fakeProfile()));
+    await runtime.start();
+    // The store path is denied by the composed configuration, not by any grant.
+    const storeFile = join(runtime.agentDir, "extensions", "seatbelt-grants", "x.json");
+    mkdirSync(dirname(storeFile), { recursive: true });
+    writeFileSync(storeFile, "{}");
+
+    expect(runtime.toolCall("read", storeFile)).toMatchObject({
+      block: true,
+      reason: expect.stringMatching(/denied/),
+    });
+  });
+
+  it("applies a session grant above the project restriction layer", async () => {
+    const runtime = await installRuntime(() => Promise.resolve(fakeProfile()));
+    const workspace = realpathSync(runtime.workspace);
+    mkdirSync(join(workspace, CONFIG_DIR_NAME), { recursive: true });
+    writeFileSync(
+      join(workspace, CONFIG_DIR_NAME, "seatbelt.json"),
+      JSON.stringify({ readable: ["${WORKSPACE}/src"], writable: ["${WORKSPACE}/src"] }),
+    );
+    for (const directory of ["src", "build"]) {
+      mkdirSync(join(workspace, directory), { recursive: true });
+      writeFileSync(join(workspace, directory, "file.txt"), "");
+    }
+    const outside = tempDir("seatbelt-runtime-outside-");
+    writeFileSync(join(outside, "file.txt"), "");
+
+    await runtime.start();
+
+    // The project layer replaces the workspace-wide allowance with `src` only.
+    expect(runtime.toolCall("read", join(workspace, "build", "file.txt"))).toMatchObject({
+      block: true,
+      reason: expect.stringMatching(/outside allowed roots/),
+    });
+
+    await runtime.command(`allow-read ${join(workspace, "build")}`);
+
+    // The session layer applies on top of the project layer.
+    expect(runtime.toolCall("read", join(workspace, "build", "file.txt"))).toBeUndefined();
+    expect(runtime.toolCall("read", join(workspace, "src", "file.txt"))).toBeUndefined();
+    expect(runtime.toolCall("read", join(outside, "file.txt"))).toMatchObject({
+      block: true,
+      reason: expect.stringMatching(/outside allowed roots/),
+    });
+  });
+
   it("never persists a session grant and drops it on the next session start", async () => {
     const persistedTarget = tempDir("seatbelt-runtime-persisted-");
     const runtime = await installRuntime(() => Promise.resolve(fakeProfile()));
@@ -447,6 +495,26 @@ describe("seatbelt grant commands", () => {
     // The revoked root is no longer readable; the surviving grant still is.
     expect(runtime.toolCall("read", join(firstTarget, "file.txt"))).toMatchObject({ block: true });
     expect(runtime.toolCall("read", join(secondTarget, "file.txt"))).toBeUndefined();
+  });
+
+  it("does not resurrect a grant another session removed from the store", async () => {
+    const removedTarget = tempDir("seatbelt-runtime-merge-removed-");
+    const revokedTarget = tempDir("seatbelt-runtime-merge-revoked-");
+    const runtime = await installRuntime(countingProfile());
+    const removed = addGrant([], { kind: "read", path: removedTarget }, runtime.workspace).grant;
+    const revoked = addGrant([], { kind: "read", path: revokedTarget }, runtime.workspace).grant;
+    seed(runtime, [removed, revoked]);
+    await runtime.start();
+    // Another pi session revoked `removed` behind this runtime's back.
+    writeRawStore(storePathOf(runtime), runtime.workspace, [revoked]);
+
+    await runtime.command(`revoke ${revoked.id}`);
+
+    // Writing the stale snapshot back would resurrect `removed`.
+    const stored = JSON.parse(readFileSync(storePathOf(runtime), "utf8"));
+    expect(stored.grants).toEqual([]);
+    expect(loadGrants(runtime.agentDir, runtime.workspace).grants).toEqual([]);
+    expect(notifyTexts(runtime.ui)).toContain(`Revoked seatbelt grant ${revoked.id}`);
   });
 
   it("revokes all persisted grants and leaves an empty grant list in the store", async () => {
@@ -604,5 +672,55 @@ describe("runtime access tool", () => {
     expect(runtime.toolCall("read", join(target, "file.txt"))).toBeUndefined();
     expect(runtime.userBash()).toMatchObject({ operations: expect.anything() });
     expect(runtime.ui.setStatus).toHaveBeenLastCalledWith("seatbelt", "🔒 seatbelt: net=localhost +1 grants");
+  });
+
+  it("merges a remembered grant with a grant another session added to the store", async () => {
+    const seededTarget = tempDir("seatbelt-runtime-merge-seeded-");
+    const addedTarget = tempDir("seatbelt-runtime-merge-added-");
+    const requestedTarget = tempDir("seatbelt-runtime-merge-requested-");
+    const runtime = await installRuntime(() => Promise.resolve(fakeProfile()));
+    const seeded = addGrant([], { kind: "read", path: seededTarget }, runtime.workspace).grant;
+    saveGrants(runtime.agentDir, runtime.workspace, [seeded]);
+    await runtime.start();
+    // Another pi session added `added` behind this runtime's back.
+    const added = addGrant([], { kind: "read", path: addedTarget }, runtime.workspace).grant;
+    writeRawStore(storePathOf(runtime), runtime.workspace, [seeded, added]);
+    runtime.ui.select.mockResolvedValue("Allow and remember for this project");
+
+    const result = await runtime.requestAccess({ kind: "read", path: requestedTarget, reason: "need the shared library" });
+
+    expect(String(result.content[0].text)).toMatch(/remembered for this project/);
+    const stored = loadGrants(runtime.agentDir, runtime.workspace).grants;
+    expect(stored.map((grant) => grant.id)).toContain(seeded.id);
+    expect(stored.map((grant) => grant.id)).toContain(added.id);
+    expect(stored).toHaveLength(3);
+    expect(stored.some((grant) => grant.kind !== "network" && grant.path === realpathSync(requestedTarget))).toBe(true);
+  });
+
+  it("keeps a written grant in sync and reports a fail-closed result when the rebuild fails", async () => {
+    const target = tempDir("seatbelt-runtime-stale-config-");
+    const runtime = await installRuntime(() => Promise.resolve(fakeProfile()));
+    await runtime.start();
+    // The project config is edited into a widening state after `session_start`.
+    mkdirSync(join(runtime.workspace, CONFIG_DIR_NAME), { recursive: true });
+    writeFileSync(join(runtime.workspace, CONFIG_DIR_NAME, "seatbelt.json"), JSON.stringify({ readable: ["/"] }));
+    runtime.ui.select.mockResolvedValue("Allow and remember for this project");
+
+    const result = await runtime.requestAccess({ kind: "read", path: target, reason: "need the shared library" });
+
+    const text = String(result.content[0].text);
+    expect(text).toMatch(/policy was not updated/);
+    // The observable state is spelled out: the write landed, the policy did not.
+    expect(text).toMatch(/on disk but was not applied/);
+    expect(text).toMatch(/outside the trusted global allowance/);
+    expect(text).not.toContain("the sandbox was re-activated");
+    expect(text).not.toMatch(/remembered for this project/);
+    // The grant is on disk, and exactly one decision record was written.
+    expect(loadGrants(runtime.agentDir, runtime.workspace).grants).toHaveLength(1);
+    expect(readFileSync(storePathOf(runtime), "utf8")).toContain(realpathSync(target));
+    expect(runtime.appendEntry).toHaveBeenCalledOnce();
+    // No activation was attempted, so the runtime still has the pre-edit profile.
+    expect(runtime.ui.setStatus.mock.calls.at(-1)).toEqual(["seatbelt", "🔒 seatbelt: net=localhost"]);
+    expect(notifyTexts(runtime.ui).filter((notice) => notice.includes("initialized"))).toHaveLength(1);
   });
 });

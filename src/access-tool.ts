@@ -11,7 +11,7 @@
  *   protected locations the refusal gate needs.
  * - `isStoreLocked()` — whether the persisted store is unusable this session.
  * - `recordSessionGrant(input)` — install a session-only grant, then rebuild.
- * - `persistGrant(input)` — write one grant to the per-project store, then rebuild.
+ * - `persistGrant(input)` — re-read the store, merge one grant, write, rebuild.
  * - `recordDecision(record)` — append the FR10 session record (best effort).
  * - `activate(ctx)` — apply the rebuilt configuration to both layers (FR8).
  * - `setConfig(next)` — part of the accessor surface but unused here: this tool
@@ -20,7 +20,8 @@
  *
  * The tool never writes the grant store itself, never widens the policy from a
  * parameter, and every agent-supplied string passes `sanitizeForDisplay` before
- * it reaches `select` or a result.
+ * it reaches `select` or a result. Once the user allows a request, `execute`
+ * never rejects: `installGrant` reports a fail-closed result instead (FR8).
  */
 import { isAbsolute, join } from "node:path";
 import { CONFIG_DIR_NAME, type ExtensionAPI, type ExtensionToolContext } from "@earendil-works/pi-coding-agent";
@@ -146,36 +147,88 @@ export function registerAccessTool(pi: ExtensionAPI, deps: RuntimeAccessors): vo
         );
       }
 
-      let persisted = false;
-      let hint = "";
-      if (choice === REMEMBER_CHOICE) {
-        if (deps.isStoreLocked()) {
-          hint = ` The grant store is unusable in this session, so the grant applies to this session only; run /seatbelt grants reset to repair it.`;
-        } else {
-          try {
-            deps.persistGrant(request.input);
-            persisted = true;
-          } catch (error) {
-            hint = ` The grant could not be saved (${sanitizeForDisplay(errorMessage(error))}), so it applies to this session only; run /seatbelt grants reset to repair the store.`;
-          }
-        }
-      }
-      if (!persisted) deps.recordSessionGrant(request.input);
-      deps.recordDecision(decisionRecord(request, persisted ? "remember" : "session"));
+      const install = installGrant(deps, request, choice === REMEMBER_CHOICE);
+      // The session record is written exactly once per decision, whatever the
+      // install outcome (FR10).
+      deps.recordDecision(decisionRecord(request, install.persisted ? "remember" : "session"));
 
-      await deps.activate(ctx);
+      if (install.failure !== undefined) {
+        return textResult(
+          `Seatbelt: ${targetPhrase(request)} was approved, but the grant could not be installed (${install.failure}), so the seatbelt policy was not updated and the sandbox was not re-activated. Access remains blocked; ask the user to repair the problem before asking again.`,
+        );
+      }
+
+      try {
+        await deps.activate(ctx);
+      } catch (error) {
+        return textResult(
+          `Seatbelt: ${grantSummary(request, install.persisted)}, but re-activating the sandbox failed (${sanitizeForDisplay(errorMessage(error))}). Access may stay blocked until the sandbox recovers.${install.hint}`,
+        );
+      }
 
       const after = deps.getState();
       if (after !== "active") {
         const reason = deps.getFailureReason();
         return textResult(
-          `Seatbelt: ${grantSummary(request, persisted)}, but the sandbox failed to activate (state: ${after}${reason ? `: ${sanitizeForDisplay(reason)}` : ""}). ${persisted ? "The grant stays on disk" : "The grant stays in this session"}; access remains blocked until the sandbox recovers.${hint}`,
+          `Seatbelt: ${grantSummary(request, install.persisted)}, but the sandbox failed to activate (state: ${after}${reason ? `: ${sanitizeForDisplay(reason)}` : ""}). ${install.persisted ? "The grant stays on disk" : "The grant stays in this session"}; access remains blocked until the sandbox recovers.${install.hint}`,
         );
       }
 
-      return textResult(`Seatbelt: ${grantSummary(request, persisted)}; the sandbox was re-activated.${hint}`);
+      return textResult(`Seatbelt: ${grantSummary(request, install.persisted)}; the sandbox was re-activated.${install.hint}`);
     },
   });
+}
+
+/** The outcome of installing one approved grant (FR8). */
+interface GrantInstall {
+  /** Whether the grant reached the per-project store. */
+  persisted: boolean;
+  /** Extra sentence appended to the result, already sanitized. */
+  hint: string;
+  /**
+   * Set when no grant could be installed at all: the sanitized error text. The
+   * policy was not updated in that case.
+   */
+  failure?: string;
+}
+
+/**
+ * Install one approved grant (FR8) and never throw. A store failure falls back
+ * to a session-only grant — the store error already means nothing was written —
+ * and a fallback that fails too returns a `failure` outcome instead of escaping
+ * `execute` as a rejected promise, which would leave the runtime half-applied.
+ */
+function installGrant(deps: RuntimeAccessors, request: AccessRequest, remember: boolean): GrantInstall {
+  let storeFailure: string | undefined;
+  let hint = "";
+  if (remember) {
+    if (deps.isStoreLocked()) {
+      hint = ` The grant store is unusable in this session, so the grant applies to this session only; run /seatbelt grants reset to repair it.`;
+    } else {
+      try {
+        deps.persistGrant(request.input);
+        return { persisted: true, hint };
+      } catch (error) {
+        storeFailure = sanitizeForDisplay(errorMessage(error));
+        hint = ` The grant could not be saved (${storeFailure}), so it applies to this session only; run /seatbelt grants reset to repair the store.`;
+      }
+    }
+  }
+
+  try {
+    deps.recordSessionGrant(request.input);
+  } catch (error) {
+    const fallbackFailure = sanitizeForDisplay(errorMessage(error));
+    // A rebuild failure names the same underlying error twice; report it once.
+    const detail =
+      storeFailure === undefined
+        ? fallbackFailure
+        : storeFailure.includes(fallbackFailure)
+          ? storeFailure
+          : `${storeFailure}; the session fallback also failed (${fallbackFailure})`;
+    return { persisted: false, hint, failure: detail };
+  }
+  return { persisted: false, hint };
 }
 
 /** Validate the cross-field rules and the reason length before any dialog (FR1). */
