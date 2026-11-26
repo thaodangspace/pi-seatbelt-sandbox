@@ -6,8 +6,8 @@ import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createSeatbeltBashOperations } from "../src/bash.ts";
-import type { SeatbeltConfig } from "../src/config.ts";
-import { applyGrantStoreDeny, grantStoreDenyPaths, grantStorePath } from "../src/grants.ts";
+import { composeConfig, type SeatbeltConfig } from "../src/config.ts";
+import { addGrant, applyGrantStoreDeny, grantStoreDenyPaths, grantStorePath } from "../src/grants.ts";
 import { SANDBOX_EXEC_PATH } from "../src/sandbox-exec.ts";
 import { createProfileFile, type ProfileFile } from "../src/seatbelt.ts";
 
@@ -27,6 +27,31 @@ const sandboxUnavailableReason = (() => {
 const hasSandboxExec = sandboxUnavailableReason === undefined;
 if (sandboxUnavailableReason) console.info(`Skipping Seatbelt integration: ${sandboxUnavailableReason}`);
 const runIf = hasSandboxExec ? describe : describe.skip;
+
+/** A config with no grant surface: the workspace is the only writable root. */
+function grantBaseConfig(workspace: string): SeatbeltConfig {
+  return {
+    enabled: true,
+    failClosed: true,
+    readable: [workspace, "/bin", "/usr", "/System", "/Library", "/etc", "/private/etc", "/dev/null", "/dev/urandom"],
+    writable: [workspace],
+    denyRead: [],
+    denyWrite: [],
+    environment: { mode: "inherit", deny: [] },
+    network: { mode: "none" },
+  };
+}
+
+/** `createProfileFile` arguments for a composed config, as the runtime builds them. */
+function profileFromConfig(config: SeatbeltConfig) {
+  return {
+    readable: config.readable,
+    writable: config.writable,
+    denyRead: config.denyRead,
+    denyWrite: config.denyWrite,
+    network: config.network.mode,
+  };
+}
 
 // Python's multiprocessing.SemLock is the capability under test; skip when no
 // interpreter is available so the suite stays usable on hosts without one.
@@ -367,6 +392,117 @@ runIf("sandbox-exec integration", () => {
       await profile.dispose();
       rmSync(agentDir, { recursive: true, force: true });
       rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("applies a read grant to the real profile and keeps it scoped", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "seatbelt-grant-read-"));
+    const granted = mkdtempSync(join(homedir(), ".seatbelt-grant-read-"));
+    const ungranted = mkdtempSync(join(homedir(), ".seatbelt-grant-read-other-"));
+    const grantedFile = join(granted, "granted.txt");
+    const ungrantedFile = join(ungranted, "other.txt");
+    writeFileSync(grantedFile, "granted-content");
+    writeFileSync(ungrantedFile, "other-content");
+
+    const base = grantBaseConfig(cwd);
+    const grant = addGrant([], { kind: "read", path: granted }, cwd).grant;
+    const composed = composeConfig(base, {}, [grant], cwd);
+
+    let ungrantedProfile: ProfileFile | undefined;
+    let grantedProfile: ProfileFile | undefined;
+    try {
+      const run = async (profile: ProfileFile, script: string) => {
+        const output: Buffer[] = [];
+        const result = await createSeatbeltBashOperations(profile.path).exec(script, cwd, {
+          onData: (chunk) => output.push(Buffer.from(chunk)),
+        });
+        return { exitCode: result.exitCode, stdout: Buffer.concat(output).toString() };
+      };
+
+      // Without the grant the file outside the readable roots is unreachable, so
+      // the granted run below can only have been opened by the grant itself.
+      ungrantedProfile = await createProfileFile(profileFromConfig(base));
+      expect((await run(ungrantedProfile, `cat ${JSON.stringify(grantedFile)}`)).exitCode).not.toBe(0);
+
+      grantedProfile = await createProfileFile(profileFromConfig(composed));
+      const allowed = await run(grantedProfile, `cat ${JSON.stringify(grantedFile)}`);
+      expect(allowed.exitCode).toBe(0);
+      expect(allowed.stdout).toContain("granted-content");
+
+      // Scoped: a sibling directory outside the granted root stays unreachable.
+      expect((await run(grantedProfile, `cat ${JSON.stringify(ungrantedFile)}`)).exitCode).not.toBe(0);
+    } finally {
+      await ungrantedProfile?.dispose();
+      await grantedProfile?.dispose();
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(granted, { recursive: true, force: true });
+      rmSync(ungranted, { recursive: true, force: true });
+    }
+  });
+
+  it("applies a write grant to the real profile and lets deny rules win", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "seatbelt-grant-write-"));
+    const granted = mkdtempSync(join(homedir(), ".seatbelt-grant-write-"));
+    const ungranted = mkdtempSync(join(homedir(), ".seatbelt-grant-write-other-"));
+    const grantedFile = join(granted, "new.txt");
+    const ungrantedFile = join(ungranted, "new.txt");
+    const deniedFile = join(granted, "denied.txt");
+
+    const base = grantBaseConfig(cwd);
+    // A deny path inside the granted root: the profile must keep the deny on top.
+    base.denyWrite = [deniedFile];
+    const grant = addGrant([], { kind: "write", path: granted }, cwd).grant;
+    const composed = composeConfig(base, {}, [grant], cwd);
+
+    const profile = await createProfileFile(profileFromConfig(composed));
+    try {
+      const ops = createSeatbeltBashOperations(profile.path);
+      const run = (script: string) => ops.exec(script, cwd, { onData() {} });
+
+      // A write grant implies read access to the same root.
+      expect((await run(`echo granted > ${JSON.stringify(grantedFile)}`)).exitCode).toBe(0);
+      expect(existsSync(grantedFile)).toBe(true);
+      expect((await run(`cat ${JSON.stringify(grantedFile)}`)).exitCode).toBe(0);
+
+      // Scoped: an ungranted sibling stays unwritable, and the deny still wins.
+      expect((await run(`echo no > ${JSON.stringify(ungrantedFile)}`)).exitCode).not.toBe(0);
+      expect(existsSync(ungrantedFile)).toBe(false);
+      expect((await run(`echo no > ${JSON.stringify(deniedFile)}`)).exitCode).not.toBe(0);
+      expect(existsSync(deniedFile)).toBe(false);
+    } finally {
+      await profile.dispose();
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(granted, { recursive: true, force: true });
+      rmSync(ungranted, { recursive: true, force: true });
+    }
+  });
+
+  it("widens the network mode through a network grant in the real profile", async () => {
+    const server = createServer((_req, res) => res.end("ok"));
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const port = (server.address() as { port: number }).port;
+    const cwd = mkdtempSync(join(tmpdir(), "seatbelt-grant-net-"));
+
+    const base = grantBaseConfig(cwd);
+    const grant = addGrant([], { kind: "network", mode: "localhost" }, cwd).grant;
+    const composed = composeConfig(base, {}, [grant], cwd);
+
+    let noneProfile: ProfileFile | undefined;
+    let grantedProfile: ProfileFile | undefined;
+    try {
+      const curlLocalhost = `curl -fsS --max-time 3 http://127.0.0.1:${port}`;
+
+      noneProfile = await createProfileFile(profileFromConfig(base));
+      expect((await createSeatbeltBashOperations(noneProfile.path).exec(curlLocalhost, cwd, { onData() {} })).exitCode).not.toBe(0);
+
+      grantedProfile = await createProfileFile(profileFromConfig(composed));
+      expect((await createSeatbeltBashOperations(grantedProfile.path).exec(curlLocalhost, cwd, { onData() {} })).exitCode).toBe(0);
+    } finally {
+      await noneProfile?.dispose();
+      await grantedProfile?.dispose();
+      rmSync(cwd, { recursive: true, force: true });
+      server.close();
     }
   });
 });
