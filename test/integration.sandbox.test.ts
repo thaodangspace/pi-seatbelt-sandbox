@@ -1,11 +1,13 @@
 import { execFileSync } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:http";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createSeatbeltBashOperations } from "../src/bash.ts";
+import type { SeatbeltConfig } from "../src/config.ts";
+import { applyGrantStoreDeny, grantStoreDenyPaths, grantStorePath } from "../src/grants.ts";
 import { SANDBOX_EXEC_PATH } from "../src/sandbox-exec.ts";
 import { createProfileFile, type ProfileFile } from "../src/seatbelt.ts";
 
@@ -315,5 +317,56 @@ runIf("sandbox-exec integration", () => {
     expect((statSync(dir).mode & 0o777)).toBe(0o700);
     await profile.dispose();
     expect(existsSync(dir)).toBe(false);
+  });
+
+  it("blocks reading, creating, and replacing grant store files", async () => {
+    const agentDir = mkdtempSync(join(tmpdir(), "seatbelt-grants-agent-"));
+    const cwd = mkdtempSync(join(tmpdir(), "seatbelt-grants-workspace-"));
+    const storeDir = grantStoreDenyPaths(agentDir)[0];
+    const grantFile = grantStorePath(agentDir, cwd);
+    const originalGrantFile = '{\n  "version": 1,\n  "projectRoot": "/tmp/project",\n  "grants": []\n}\n';
+    mkdirSync(storeDir, { recursive: true, mode: 0o700 });
+    writeFileSync(grantFile, originalGrantFile, { mode: 0o600 });
+
+    // The store sits under a writable root (tmpdir) so only the deny can block it.
+    const baseConfig: SeatbeltConfig = {
+      enabled: true,
+      failClosed: true,
+      readable: [cwd, tmpdir(), "/bin", "/usr", "/System", "/Library", "/etc", "/private/etc", "/dev/null", "/dev/urandom"],
+      writable: [cwd, tmpdir()],
+      denyRead: [],
+      denyWrite: [],
+      environment: { mode: "inherit", deny: [] },
+      network: { mode: "none" },
+    };
+    const config = applyGrantStoreDeny(baseConfig, agentDir);
+    const profile = await createProfileFile({
+      readable: config.readable,
+      writable: config.writable,
+      denyRead: config.denyRead,
+      denyWrite: config.denyWrite,
+      network: config.network.mode,
+    });
+    try {
+      const ops = createSeatbeltBashOperations(profile.path);
+      const run = (script: string) => ops.exec(`/bin/sh -c ${JSON.stringify(script)}`, cwd, { onData() {} });
+
+      // Positive control: the same commands work outside the denied subtree, so
+      // a non-zero exit below can only come from the store deny.
+      const controlFile = join(cwd, "control.txt");
+      writeFileSync(controlFile, "control");
+      expect((await run(`cat ${JSON.stringify(controlFile)}`)).exitCode).toBe(0);
+      expect((await run(`echo ok > ${JSON.stringify(join(cwd, "control-write.txt"))}`)).exitCode).toBe(0);
+
+      expect((await run(`cat ${JSON.stringify(grantFile)}`)).exitCode).not.toBe(0);
+      expect((await run(`echo x > ${JSON.stringify(join(storeDir, "new.json"))}`)).exitCode).not.toBe(0);
+      expect(existsSync(join(storeDir, "new.json"))).toBe(false);
+      expect((await run(`echo x > ${JSON.stringify(grantFile)}`)).exitCode).not.toBe(0);
+      expect(readFileSync(grantFile, "utf8")).toBe(originalGrantFile);
+    } finally {
+      await profile.dispose();
+      rmSync(agentDir, { recursive: true, force: true });
+      rmSync(cwd, { recursive: true, force: true });
+    }
   });
 });

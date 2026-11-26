@@ -1,10 +1,11 @@
 import { accessSync, constants } from "node:fs";
-import { resolve } from "node:path";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { join, resolve } from "node:path";
+import { CONFIG_DIR_NAME, getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createBashTool } from "@earendil-works/pi-coding-agent";
 import { createSeatbeltBashOperations } from "./src/bash.ts";
 import { SANDBOX_EXEC_PATH } from "./src/sandbox-exec.ts";
-import { ConfigError, DEFAULT_CONFIG, expandConfigPath, loadConfig, type SeatbeltConfig } from "./src/config.ts";
+import { ConfigError, DEFAULT_CONFIG, composeConfig, expandConfigPath, loadBaseConfig, loadProjectOverride, type SeatbeltConfig } from "./src/config.ts";
+import { applyGrantStoreDeny } from "./src/grants.ts";
 import { buildPolicy, type PathPolicy } from "./src/policy.ts";
 import { createProfileFile, type ProfileFile } from "./src/seatbelt.ts";
 import { registerToolGuard } from "./src/tool-guard.ts";
@@ -156,6 +157,18 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
     }
   }
 
+  /**
+   * The single configuration mutator: nothing else assigns `config`. Phase 3
+   * covers the first three FR7 layers plus the store deny; later phases add the
+   * grant layer before the project layer and session changes before the denies.
+   */
+  function rebuildConfig(): void {
+    const base = loadBaseConfig(sessionRoot);
+    const projectConfigPath = join(sessionRoot, CONFIG_DIR_NAME, "seatbelt.json");
+    const composed = composeConfig(base, loadProjectOverride(sessionRoot), [], sessionRoot, projectConfigPath);
+    config = applyGrantStoreDeny(composed, getAgentDir());
+  }
+
   async function activate(ctx: Pick<ExtensionContext, "ui">, reloadConfig = false): Promise<void> {
     // Every transition first refuses commands. No path may run local bash while
     // an old profile is being disposed or a replacement is being created.
@@ -165,7 +178,7 @@ export default function seatbeltSandbox(pi: ExtensionAPI) {
 
     try {
       await disposeProfile();
-      if (reloadConfig) config = loadConfig(sessionRoot);
+      if (reloadConfig) rebuildConfig();
 
       if (!config.enabled || pi.getFlag("no-seatbelt") === true) {
         state = "disabled";

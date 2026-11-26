@@ -345,6 +345,22 @@ export function grantStoreDenyPaths(agentDir: string): string[] {
   return [canon(grantStoreDir(agentDir))];
 }
 
+/**
+ * Append the store deny paths to both deny lists before the policy and the
+ * profile are built (FR6). Pure: existing order is preserved, new entries are
+ * appended last, a path a global or project layer already denies is not
+ * repeated, and every other field is passed through untouched.
+ */
+export function applyGrantStoreDeny(config: SeatbeltConfig, agentDir: string): SeatbeltConfig {
+  const denyRead = [...config.denyRead];
+  const denyWrite = [...config.denyWrite];
+  for (const storePath of grantStoreDenyPaths(agentDir)) {
+    appendUnique(denyRead, storePath);
+    appendUnique(denyWrite, storePath);
+  }
+  return { ...config, denyRead, denyWrite };
+}
+
 const ANSI_ESCAPE = /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)|[@-Z\\-_])/g;
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/g;
 const WHITESPACE_RUNS = /\s+/g;
