@@ -45,7 +45,7 @@ Example:
 
 Variables supported in path lists: `${WORKSPACE}`, `${HOME}`, `${TMPDIR}`. Unknown variables are config errors. Existing configuration files are validated before merging: unreadable files, invalid JSON, unknown keys, invalid nested objects, and unsupported values are configuration errors that put the session into fail-closed mode; the UI reports the source filename.
 
-Tool parameter schemas use `typebox` (`import { Type } from "typebox"`); Pi pins `typebox@1.3.27` and does not re-export `Type` from its own entry point, so this package declares it as a direct dependency.
+Tool parameter schemas use `typebox` (`import { Type } from "typebox"`). Pi pins `typebox@1.3.27`, supplies it to extensions as a host module, and does not re-export `Type` from its own entry point, so this package declares it in `peerDependencies` with a `*` range (never in `dependencies`, which would install a second copy and bypass Pi's module mapping) and in `devDependencies` for local typechecking and tests.
 
 Path semantics:
 
